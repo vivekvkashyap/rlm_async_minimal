@@ -1,14 +1,24 @@
 """
 Root (colorful) logger for RLM client that tracks model outputs and message changes.
+
+Naming Convention:
+- Root LLM: Main LLM at depth 0 with REPL (e.g., "Root LLM")
+- Sub Root LLM: RLM_REPL spawned by parent, has REPL (e.g., "Sub Root LLM 00", "Sub Root LLM 00.a")
+- Sub LLM: Terminal Sub_RLM without REPL (e.g., "Sub LLM 00", "Sub LLM 00.a")
 """
 
-from typing import List, Dict
+from typing import List, Dict, Optional
 from datetime import datetime
 
 
 class ColorfulLogger:
     """
     A colorful logger that tracks RLM client interactions with the model.
+    
+    Supports hierarchical naming:
+    - Root LLM (depth=0, iter=X/Y, current_iter=Z)
+    - Sub Root LLM 00 (depth=1, iter=X/Y, current_iter=Z)
+    - Sub Root LLM 00.a (depth=2, iter=X/Y, current_iter=Z)
     """
     
     # ANSI color codes
@@ -31,16 +41,31 @@ class ColorfulLogger:
         'BG_CYAN': '\033[46m',
     }
     
-    def __init__(self, enabled: bool = True, depth: int = 0):
+    def __init__(
+        self, 
+        enabled: bool = True, 
+        depth: int = 0,
+        max_depth: int = 3,
+        instance_name: str = "Root LLM",
+        max_iterations: int = 20,
+    ):
         """
         Initialize the colorful logger.
         
         Args:
             enabled: Whether console logging is enabled
             depth: Current recursion depth (for multi-depth RLM)
+            max_depth: Maximum recursion depth allowed
+            instance_name: Name of this LLM instance (e.g., "Root LLM", "Sub Root LLM 0-0")
+            max_iterations: Maximum iterations for this instance
         """
         self.enabled = enabled
         self.depth = depth
+        self.max_depth = max_depth
+        self.instance_name = instance_name
+        self.max_iterations = max_iterations
+        self.current_iteration = 0
+        
         self.conversation_step = 0
         self.last_messages_length = 0
         self.current_query = ""
@@ -49,7 +74,17 @@ class ColorfulLogger:
         
         # Depth-based indentation for visual hierarchy
         self._indent = "  " * depth
-        self._depth_prefix = f"[D{depth}] " if depth > 0 else ""
+        self._build_prefix()
+    
+    def _build_prefix(self) -> str:
+        """Build the prefix string with instance name and iteration info."""
+        self._prefix = f"[{self.instance_name} | depth={self.depth}/{self.max_depth} | iter={self.current_iteration}/{self.max_iterations}]"
+        return self._prefix
+    
+    def update_iteration(self, current_iteration: int):
+        """Update the current iteration and rebuild prefix."""
+        self.current_iteration = current_iteration
+        self._build_prefix()
         
     def _colorize(self, text: str, color: str) -> str:
         """Apply color to text if logging is enabled."""
@@ -61,7 +96,7 @@ class ColorfulLogger:
         """Print a colored separator line."""
         if self.enabled:
             separator = char * 80
-            print(self._colorize(separator, color))
+            print(self._colorize(self._indent + separator, color))
     
     def log_query_start(self, query: str):
         """Log the start of a new query."""
@@ -75,11 +110,12 @@ class ColorfulLogger:
         self.current_depth = 0
         
         self._print_separator("=", "GREEN")
-        print(self._colorize("STARTING NEW QUERY", "BOLD") + self._colorize(" | ", "DIM") + 
+        print(self._indent + self._colorize(f"STARTING NEW QUERY - {self._prefix}", "BOLD") + 
+              self._colorize(" | ", "DIM") + 
               self._colorize(datetime.now().strftime("%H:%M:%S"), "DIM"))
         self._print_separator("=", "GREEN")
         
-        print(self._colorize("QUERY:", "BOLD") + f" {query}")
+        print(self._indent + self._colorize("QUERY:", "BOLD") + f" {query}")
         print()
     
     def log_initial_messages(self, messages: List[Dict[str, str]]):
@@ -87,7 +123,7 @@ class ColorfulLogger:
         if not self.enabled:
             return
             
-        print(self._colorize("INITIAL MESSAGES SETUP:", "BOLD"))
+        print(self._indent + self._colorize(f"INITIAL MESSAGES SETUP - {self._prefix}:", "BOLD"))
         for i, msg in enumerate(messages):
             role = msg.get('role', 'unknown')
             content = msg.get('content', '')
@@ -97,10 +133,18 @@ class ColorfulLogger:
                 content = content[:2000] + "..."
             
             role_color = "BLUE" if role == "user" else "MAGENTA" if role == "assistant" else "YELLOW"
-            print(f"  {self._colorize(f'[{i+1}] {role.upper()}:', role_color)} {content}")
+            print(self._indent + f"  {self._colorize(f'[{i+1}] {role.upper()}:', role_color)} {content}")
         
         print()
         self.last_messages_length = len(messages)
+    
+    def log_iteration_start(self, iteration: int):
+        """Log the start of a new iteration."""
+        if not self.enabled:
+            return
+        
+        self.update_iteration(iteration)
+        print(self._indent + self._colorize(f"--- {self._prefix} ---", "CYAN"))
     
     def log_model_response(self, response: str, has_tool_calls: bool):
         """Log the model's response."""
@@ -109,19 +153,19 @@ class ColorfulLogger:
             
         self.conversation_step += 1
         
-        print(self._colorize(f"MODEL RESPONSE (Step {self.conversation_step}):", "BOLD"))
+        print(self._indent + self._colorize(f"MODEL RESPONSE - {self._prefix} (Step {self.conversation_step}):", "BOLD"))
         
         # Truncate very long responses for readability
         display_response = response
         if len(response) > 500:
             display_response = response[:500] + "..."
         
-        print(f"  {self._colorize('Response:', 'CYAN')} {display_response}")
+        print(self._indent + f"  {self._colorize('Response:', 'CYAN')} {display_response}")
         
         if has_tool_calls:
-            print(self._colorize("  Contains tool calls - will execute them", "YELLOW"))
+            print(self._indent + self._colorize("  Contains tool calls - will execute them", "YELLOW"))
         else:
-            print(self._colorize("  No tool calls - final response", "GREEN"))
+            print(self._indent + self._colorize("  No tool calls - final response", "GREEN"))
         
         print()
     
@@ -130,15 +174,15 @@ class ColorfulLogger:
         if not self.enabled:
             return
             
-        print(self._colorize("TOOL EXECUTION:", "BOLD"))
-        print(f"  {self._colorize('Call:', 'YELLOW')} {tool_call_str}")
+        print(self._indent + self._colorize(f"TOOL EXECUTION - {self._prefix}:", "BOLD"))
+        print(self._indent + f"  {self._colorize('Call:', 'YELLOW')} {tool_call_str}")
         
         # Truncate very long results for readability
         display_result = tool_result
         if len(tool_result) > 300:
             display_result = tool_result[:300] + "..."
         
-        print(f"  {self._colorize('Result:', 'GREEN')} {display_result}")
+        print(self._indent + f"  {self._colorize('Result:', 'GREEN')} {display_result}")
         print()
     
     def log_final_response(self, response: str):
@@ -147,8 +191,8 @@ class ColorfulLogger:
             return
             
         self._print_separator("=", "GREEN")
-        print(self._colorize("FINAL RESPONSE:", "BOLD"))
+        print(self._indent + self._colorize(f"FINAL RESPONSE - {self._prefix}:", "BOLD"))
         self._print_separator("=", "GREEN")
-        print(response)
+        print(self._indent + response)
         self._print_separator("=", "GREEN")
-        print() 
+        print()

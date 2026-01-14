@@ -16,16 +16,44 @@ class CodeExecution:
     execution_time: Optional[float] = None
 
 class REPLEnvLogger:
-    def __init__(self, max_output_length: int = 2000, enabled: bool = True, depth: int = 0):
+    """
+    Logger for REPL environment code executions.
+    
+    Supports hierarchical naming:
+    - Root LLM (depth=0)
+    - Sub Root LLM 00, 01, etc. (depth=1+, has REPL)
+    - Sub LLM 00, 01, etc. (terminal, no REPL)
+    """
+    
+    def __init__(
+        self, 
+        max_output_length: int = 2000, 
+        enabled: bool = True, 
+        depth: int = 0,
+        instance_name: str = "Root LLM",
+    ):
+        """
+        Initialize the REPL environment logger.
+        
+        Args:
+            max_output_length: Maximum characters to display in output
+            enabled: Whether logging is enabled
+            depth: Current recursion depth
+            instance_name: Name of the parent LLM instance (e.g., "Root LLM", "Sub Root LLM 00")
+        """
         self.enabled = enabled
         self.depth = depth
+        self.instance_name = instance_name
         self.console = Console()
         self.executions: List[CodeExecution] = []
         self.execution_count = 0
         self.max_output_length = max_output_length
         
-        # Depth-based prefix for visual hierarchy
-        self._depth_prefix = f"[D{depth}] " if depth > 0 else ""
+        # Instance-based prefix for visual hierarchy
+        self._instance_prefix = f"[{instance_name}]"
+        
+        # Depth-based indentation
+        self._indent = "  " * depth
     
     def _truncate_output(self, text: str) -> str:
         """Truncate text output to prevent overwhelming console output."""
@@ -74,12 +102,17 @@ class REPLEnvLogger:
         """Display a single code execution like a Jupyter cell"""
         if not self.enabled:
             return
+        
         # Input cell (code) - also truncate if too long
         timing_panel = None
         display_code = self._truncate_output(execution.code)
+        
+        # Title with instance name
+        input_title = f"[bold blue]{self._instance_prefix} In [{execution.execution_number}]:[/bold blue]"
+        
         input_panel = Panel(
             Syntax(display_code, "python", theme="monokai", line_numbers=True),
-            title=f"[bold blue]In [{execution.execution_number}]:[/bold blue]",
+            title=input_title,
             border_style="blue",
             box=box.ROUNDED
         )
@@ -92,7 +125,7 @@ class REPLEnvLogger:
             error_text = Text(display_stderr, style="bold red")
             output_panel = Panel(
                 error_text,
-                title=f"[bold red]Error in [{execution.execution_number}]:[/bold red]",
+                title=f"[bold red]{self._instance_prefix} Error in [{execution.execution_number}]:[/bold red]",
                 border_style="red",
                 box=box.ROUNDED
             )
@@ -103,7 +136,7 @@ class REPLEnvLogger:
             
             output_panel = Panel(
                 output_text,
-                title=f"[bold green]Out [{execution.execution_number}]:[/bold green]",
+                title=f"[bold green]{self._instance_prefix} Out [{execution.execution_number}]:[/bold green]",
                 border_style="green",
                 box=box.ROUNDED
             )
@@ -113,7 +146,7 @@ class REPLEnvLogger:
                     Text(f"Execution time: {execution.execution_time:.4f}s", style="bright_black"),
                     border_style="grey37",
                     box=box.ROUNDED,
-                    title=f"[bold grey37]Timing [{execution.execution_number}]:[/bold grey37]"
+                    title=f"[bold grey37]{self._instance_prefix} Timing [{execution.execution_number}]:[/bold grey37]"
                 )
         else:
             # No output but still show timing if available
@@ -121,7 +154,7 @@ class REPLEnvLogger:
                 timing_text = Text(f"Execution time: {execution.execution_time:.4f}s", style="dim")
                 output_panel = Panel(
                     timing_text,
-                    title=f"[bold dim]Out [{execution.execution_number}]:[/bold dim]",
+                    title=f"[bold dim]{self._instance_prefix} Out [{execution.execution_number}]:[/bold dim]",
                     border_style="dim",
                     box=box.ROUNDED
                 )
@@ -129,12 +162,12 @@ class REPLEnvLogger:
                     Text(f"Execution time: {execution.execution_time:.4f}s", style="bright_black"),
                     border_style="grey37",
                     box=box.ROUNDED,
-                    title=f"[bold grey37]Timing [{execution.execution_number}]:[/bold grey37]"
+                    title=f"[bold grey37]{self._instance_prefix} Timing [{execution.execution_number}]:[/bold grey37]"
                 )
             else:
                 output_panel = Panel(
                     Text("No output", style="dim"),
-                    title=f"[bold dim]Out [{execution.execution_number}]:[/bold dim]",
+                    title=f"[bold dim]{self._instance_prefix} Out [{execution.execution_number}]:[/bold dim]",
                     border_style="dim",
                     box=box.ROUNDED
                 )

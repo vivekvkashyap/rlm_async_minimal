@@ -18,26 +18,75 @@ if TYPE_CHECKING:
     from rlm.rlm_repl import RLM_REPL
 
 
+def generate_spawn_id(parent_spawn_id: str, parent_iteration: int, spawn_index: int, depth: int) -> str:
+    """
+    Generate a spawn ID for a child LLM.
+    
+    Naming convention:
+    - First level children (depth 1): "0-0", "0-1", "1-0", "1-1" (parent_iter-spawn_index)
+    - Second level children (depth 2+): "0-0.a", "0-0.b", "0-1.a" (parent_id.letter)
+    
+    Args:
+        parent_spawn_id: The spawn ID of the parent (empty for root)
+        parent_iteration: The current iteration of the parent when spawning
+        spawn_index: Index of this spawn within the same parent iteration
+        depth: The depth of the NEW child (not the parent)
+        
+    Returns:
+        Spawn ID string
+    """
+    if depth == 1:
+        # Direct children of root: use "X-Y" format (X = parent iter, Y = spawn index)
+        return f"{parent_iteration}-{spawn_index}"
+    else:
+        # Deeper children: append letter to parent's spawn_id
+        # spawn_index 0 -> 'a', 1 -> 'b', etc.
+        letter = chr(ord('a') + spawn_index)
+        return f"{parent_spawn_id}.{letter}"
+
+
+def generate_sub_llm_name(spawn_id: str) -> str:
+    """Generate name for terminal Sub_RLM (no REPL)."""
+    return f"Sub LLM {spawn_id}"
+
+
 # Simple sub LM for REPL environment - TERMINAL node (no REPL, no further recursion)
 class Sub_RLM(RLM):
     """
     Terminal LLM client for REPL environment.
     This is a simple API wrapper without REPL capabilities.
     Used as the final depth level where no further recursion is allowed.
+    
+    Naming: "Sub LLM {spawn_id}" (e.g., "Sub LLM 00", "Sub LLM 00.a")
     """
     
-    def __init__(self, model: str = "gpt-5", api_key: Optional[str] = None):
+    def __init__(
+        self, 
+        model: str = "gpt-5", 
+        api_key: Optional[str] = None,
+        # New naming parameters
+        spawn_id: str = "",
+        depth: int = 0,
+        enable_logging: bool = False,
+    ):
         # Configuration - model can be specified
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY environment variable is required")
         
         self.model = model
+        self.depth = depth
+        self.spawn_id = spawn_id
+        self.instance_name = generate_sub_llm_name(spawn_id) if spawn_id else "Sub LLM"
+        self.enable_logging = enable_logging
 
         # Initialize OpenAI clients (sync and async)
         from rlm.utils.llm import OpenAIClient, AsyncOpenAIClient
         self.client = OpenAIClient(api_key=self.api_key, model=model)
         self.async_client = AsyncOpenAIClient(api_key=self.api_key, model=model)
+        
+        if enable_logging:
+            print(f"[{self.instance_name}] Sub_RLM initialized (depth={depth}, terminal - no REPL)")
         
     
     def completion(self, prompt) -> str:
@@ -112,6 +161,10 @@ class REPLEnv:
     Supports multi-depth recursion:
     - If depth < max_depth - 1: sub_rlm is an RLM_REPL (has its own REPL)
     - If depth >= max_depth - 1: sub_rlm is a Sub_RLM (terminal, no REPL)
+    
+    Tracks spawn naming for hierarchical LLM identification:
+    - Direct children of Root: "00", "01", "10", etc.
+    - Grandchildren: "00.a", "00.b", "01.a", etc.
     """
     
     def __init__(
@@ -125,6 +178,9 @@ class REPLEnv:
         max_iterations: int = 20,
         api_key: Optional[str] = None,
         enable_logging: bool = False,
+        # New naming parameters
+        parent_instance_name: str = "Root LLM",
+        parent_spawn_id: str = "",
     ):
         # Store depth info
         self.depth = depth
@@ -134,6 +190,18 @@ class REPLEnv:
         self.enable_logging = enable_logging
         self.recursive_model = recursive_model
         
+        # Naming info for child spawning
+        self.parent_instance_name = parent_instance_name
+        self.parent_spawn_id = parent_spawn_id
+        self.parent_current_iteration = 0  # Will be updated by parent RLM_REPL
+        
+        # Spawn counter: tracks how many children spawned per parent iteration
+        # Key: parent_iteration, Value: spawn_count
+        self._spawn_counters = {}
+        
+        # Thread lock for spawn counter (for parallel batch completions)
+        self._spawn_lock = threading.Lock()
+        
         # Store the original working directory
         self.original_cwd = os.getcwd()
         
@@ -141,28 +209,20 @@ class REPLEnv:
         self.temp_dir = tempfile.mkdtemp(prefix=f"repl_env_d{depth}_")
 
         # Initialize sub_rlm based on depth
-        # If we can go deeper (depth < max_depth - 1), create RLM_REPL with REPL capabilities
-        # Otherwise, create terminal Sub_RLM (simple API call, no REPL)
+        # Note: We don't create a single persistent sub_rlm anymore for RLM_REPL case
+        # because each spawn needs its own unique naming. We create them on-demand.
+        # For Sub_RLM (terminal), we still create one for efficiency.
         if depth < max_depth - 1:
-            # Sub-RLM gets its own REPL environment and can recurse further
-            # Import here to avoid circular imports
-            from rlm.rlm_repl import RLM_REPL
-            self.sub_rlm: RLM = RLM_REPL(
-                api_key=api_key,
-                model=recursive_model,
-                recursive_model=recursive_model,
-                depth=depth + 1,
-                max_depth=max_depth,
-                max_iterations=max_iterations,  # Pass parent's max_iterations so sub-RLM can calculate reduced value
-                enable_logging=enable_logging,
-            )
+            # Sub-RLMs will be created on-demand with proper naming
             self._sub_rlm_is_recursive = True
-            print(f"[Depth {depth}] Created recursive sub_rlm (RLM_REPL at depth {depth + 1})")
+            self.sub_rlm = None  # Will be created per-call with proper naming
+            print(f"[{parent_instance_name}] REPLEnv initialized - will spawn Sub Root LLMs on demand (depth {depth + 1})")
         else:
-            # Terminal node - simple API call, no REPL
-            self.sub_rlm: RLM = Sub_RLM(model=recursive_model, api_key=api_key)
+            # Terminal node - create a single Sub_RLM for efficiency
+            # The spawn_id will be set when first used
             self._sub_rlm_is_recursive = False
-            print(f"[Depth {depth}] Created terminal sub_rlm (Sub_RLM - no REPL)")
+            self.sub_rlm = None  # Will be created on-demand with proper naming
+            print(f"[{parent_instance_name}] REPLEnv initialized - will spawn Sub LLMs on demand (terminal - no REPL)")
         
         # Create safe globals with only string-safe built-ins
         self.globals = {
@@ -251,13 +311,36 @@ class REPLEnv:
             If sub_rlm is RLM_REPL (recursive), the prompt is used as both context and query.
             If sub_rlm is Sub_RLM (terminal), the prompt is sent directly to the API.
             """
+            # Get spawn ID for this call
+            spawn_id = self._get_next_spawn_id()
+            
             if self._sub_rlm_is_recursive:
-                # RLM_REPL.completion(context, query) - use prompt as context, extract query
-                # The sub-RLM will use its own REPL environment to process this
-                return self.sub_rlm.completion(context=prompt, query="Process this and provide your answer.")
+                # Create a new RLM_REPL with proper naming
+                from rlm.rlm_repl import RLM_REPL
+                sub_rlm = RLM_REPL(
+                    api_key=self.api_key,
+                    model=self.recursive_model,
+                    recursive_model=self.recursive_model,
+                    depth=self.depth + 1,
+                    max_depth=self.max_depth,
+                    max_iterations=self.max_iterations_per_depth,
+                    enable_logging=self.enable_logging,
+                    parent_name=self.parent_instance_name,
+                    spawn_id=spawn_id,
+                )
+                # RLM_REPL.completion(context, query) - use prompt as context
+                return sub_rlm.completion(context=prompt, query="Process this and provide your answer.")
             else:
+                # Create a Sub_RLM with proper naming
+                sub_rlm = Sub_RLM(
+                    model=self.recursive_model, 
+                    api_key=self.api_key,
+                    spawn_id=spawn_id,
+                    depth=self.depth + 1,
+                    enable_logging=self.enable_logging,
+                )
                 # Sub_RLM.completion(prompt) - direct API call
-                return self.sub_rlm.completion(prompt)
+                return sub_rlm.completion(prompt)
         
         def llm_batch(prompts: List[str], max_concurrent: int = 10) -> List[str]:
             """
@@ -280,7 +363,7 @@ class REPLEnv:
                 return self._batch_recursive_completion(prompts, max_concurrent)
             else:
                 # For terminal Sub_RLM, use the async batch completion
-                return self.sub_rlm.batch_completion(prompts, max_concurrent=max_concurrent)
+                return self._batch_terminal_completion(prompts, max_concurrent)
         
         # Add (R)LM query functions to globals
         self.globals['llm_query'] = llm_query
@@ -310,6 +393,87 @@ class REPLEnv:
         if setup_code:
             self.code_execution(setup_code)
     
+    def update_parent_iteration(self, iteration: int):
+        """Update the parent's current iteration (called by parent RLM_REPL)."""
+        self.parent_current_iteration = iteration
+    
+    def _get_next_spawn_id(self) -> str:
+        """
+        Get the next spawn ID for a child LLM, thread-safe.
+        
+        Returns:
+            Spawn ID string (e.g., "00", "01", "00.a")
+        """
+        with self._spawn_lock:
+            iter_key = self.parent_current_iteration
+            
+            if iter_key not in self._spawn_counters:
+                self._spawn_counters[iter_key] = 0
+            
+            spawn_index = self._spawn_counters[iter_key]
+            self._spawn_counters[iter_key] += 1
+            
+            return generate_spawn_id(
+                parent_spawn_id=self.parent_spawn_id,
+                parent_iteration=self.parent_current_iteration,
+                spawn_index=spawn_index,
+                depth=self.depth + 1,
+            )
+    
+    def _batch_terminal_completion(self, prompts: List[str], max_concurrent: int = 10) -> List[str]:
+        """
+        Run multiple Sub_RLM completions in parallel for terminal nodes.
+        """
+        # Pre-generate all spawn IDs first (thread-safe)
+        spawn_ids = []
+        with self._spawn_lock:
+            iter_key = self.parent_current_iteration
+            if iter_key not in self._spawn_counters:
+                self._spawn_counters[iter_key] = 0
+            
+            for _ in prompts:
+                spawn_index = self._spawn_counters[iter_key]
+                self._spawn_counters[iter_key] += 1
+                spawn_ids.append(generate_spawn_id(
+                    parent_spawn_id=self.parent_spawn_id,
+                    parent_iteration=self.parent_current_iteration,
+                    spawn_index=spawn_index,
+                    depth=self.depth + 1,
+                ))
+        
+        def run_single_completion(args) -> str:
+            """Run a single Sub_RLM completion."""
+            prompt, spawn_id = args
+            try:
+                sub_rlm = Sub_RLM(
+                    model=self.recursive_model, 
+                    api_key=self.api_key,
+                    spawn_id=spawn_id,
+                    depth=self.depth + 1,
+                    enable_logging=self.enable_logging,
+                )
+                return sub_rlm.completion(prompt)
+            except Exception as e:
+                return f"Error in terminal completion: {str(e)}"
+        
+        # Run completions in parallel
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            future_to_idx = {
+                executor.submit(run_single_completion, (prompt, spawn_id)): i 
+                for i, (prompt, spawn_id) in enumerate(zip(prompts, spawn_ids))
+            }
+            
+            results = [None] * len(prompts)
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    results[idx] = f"Error: {str(e)}"
+        
+        return results
+    
     def _batch_recursive_completion(self, prompts: List[str], max_concurrent: int = 10) -> List[str]:
         """
         Run multiple RLM_REPL completions in parallel using ThreadPoolExecutor.
@@ -318,18 +482,38 @@ class REPLEnv:
         """
         from rlm.rlm_repl import RLM_REPL
         
-        def run_single_completion(prompt: str) -> str:
+        # Pre-generate all spawn IDs first (thread-safe)
+        spawn_ids = []
+        with self._spawn_lock:
+            iter_key = self.parent_current_iteration
+            if iter_key not in self._spawn_counters:
+                self._spawn_counters[iter_key] = 0
+            
+            for _ in prompts:
+                spawn_index = self._spawn_counters[iter_key]
+                self._spawn_counters[iter_key] += 1
+                spawn_ids.append(generate_spawn_id(
+                    parent_spawn_id=self.parent_spawn_id,
+                    parent_iteration=self.parent_current_iteration,
+                    spawn_index=spawn_index,
+                    depth=self.depth + 1,
+                ))
+        
+        def run_single_completion(args) -> str:
             """Run a single RLM_REPL completion in a thread."""
+            prompt, spawn_id = args
             try:
-                # Create a fresh RLM_REPL instance for this completion
+                # Create a fresh RLM_REPL instance for this completion with proper naming
                 rlm = RLM_REPL(
                     api_key=self.api_key,
                     model=self.recursive_model,
                     recursive_model=self.recursive_model,
                     depth=self.depth + 1,
                     max_depth=self.max_depth,
-                    max_iterations=self.max_iterations_per_depth,  # Pass parent's max_iterations
+                    max_iterations=self.max_iterations_per_depth,
                     enable_logging=self.enable_logging,
+                    parent_name=self.parent_instance_name,
+                    spawn_id=spawn_id,
                 )
                 return rlm.completion(context=prompt, query="Process this and provide your answer.")
             except Exception as e:
@@ -339,8 +523,8 @@ class REPLEnv:
         results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
             future_to_idx = {
-                executor.submit(run_single_completion, prompt): i 
-                for i, prompt in enumerate(prompts)
+                executor.submit(run_single_completion, (prompt, spawn_id)): i 
+                for i, (prompt, spawn_id) in enumerate(zip(prompts, spawn_ids))
             }
             
             # Collect results in order
