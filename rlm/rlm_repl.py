@@ -30,7 +30,7 @@ class RLM_REPL(RLM):
         self.api_key = api_key
         self.model = model
         self.recursive_model = recursive_model
-        self.llm = OpenAIClient(api_key, model) # Replace with other client
+        self.llm = OpenAIClient(api_key, model)
         
         # Track recursive call depth to prevent infinite loops
         self.repl_env = None
@@ -82,9 +82,13 @@ class RLM_REPL(RLM):
         
         # Main loop runs for fixed # of root LM iterations
         for iteration in range(self._max_iterations):
+
+            print(f"Iteration {iteration}")
             
             # Query root LM to interact with REPL environment
             response = self.llm.completion(self.messages + [next_action_prompt(query, iteration)])
+
+            print(f"Response: {response}")
             
             # Check for code blocks
             code_blocks = utils.find_code_blocks(response)

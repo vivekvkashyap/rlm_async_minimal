@@ -1,5 +1,5 @@
 """
-OpenAI Client wrapper specifically for GPT-5 models.
+OpenAI Client wrapper specifically for GPT models.
 """
 
 import os

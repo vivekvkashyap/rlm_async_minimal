@@ -1,7 +1,7 @@
 # Async Batch Processing Implementation - Changes Summary
 
 ## Overview
-Added async/parallel batch processing capability to the RLM system, enabling sub-LLM calls to be executed concurrently instead of sequentially. This provides significant performance improvements when processing multiple chunks or queries.
+Added async/parallel batch processing capability to the RLM system, enabling sub-LLM calls to be executed concurrently instead of sequentially using OpenAI's API. This provides significant performance improvements when processing multiple chunks or queries.
 
 ## Files Modified
 
