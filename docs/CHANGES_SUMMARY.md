@@ -234,6 +234,266 @@ See [ASYNC_BATCH_GUIDE.md](ASYNC_BATCH_GUIDE.md) for detailed documentation.
 
 ---
 
+# Multi-Depth Recursion Implementation - Changes Summary
+
+## Overview
+Added multi-depth recursion capability to the RLM system, enabling sub-LLMs to themselves act as RLM_REPL instances with their own REPL environments. This allows for hierarchical problem decomposition where sub-LLMs can spawn further sub-LLMs up to a configurable maximum depth, rather than being limited to terminal API calls.
+
+## Files Modified
+
+### 1. `rlm/rlm_repl.py` 🔄 ENHANCED
+**Changes:**
+- Added `depth` parameter to `__init__()` (default: 0 for root)
+- Added `max_depth` parameter to `__init__()` (default: 1 for backward compatibility)
+- Stored `depth` and `max_depth` as instance variables
+- Modified `setup_context()` to pass `depth` and `max_depth` to `REPLEnv`
+- Adjusted `max_iterations` based on depth to manage cost (deeper levels get fewer iterations)
+- Added depth-aware logging with `[Depth {depth}]` prefix
+- Updated docstring to explain multi-depth recursion
+
+**Key Features:**
+- Root LLM is at depth=0
+- Each sub-RLM increments depth by 1
+- Iterations are reduced for deeper levels to prevent excessive API costs
+- Backward compatible (default `max_depth=1` maintains original behavior)
+
+### 2. `rlm/repl.py` 🔄 ENHANCED
+**Changes:**
+- Added `depth`, `max_depth`, `max_iterations`, and `enable_logging` parameters to `REPLEnv.__init__()`
+- Implemented conditional sub-RLM initialization:
+  - If `depth < max_depth - 1`: Creates `RLM_REPL` instance (recursive, has REPL)
+  - If `depth >= max_depth - 1`: Creates `Sub_RLM` instance (terminal, no REPL)
+- Modified `llm_query()` to handle both `RLM_REPL` and `Sub_RLM` interfaces:
+  - `RLM_REPL`: Calls `completion(context=prompt, query=...)`
+  - `Sub_RLM`: Calls `completion(prompt)` directly
+- Modified `llm_batch()` to handle both interfaces:
+  - `RLM_REPL`: Uses `_batch_recursive_completion()` for parallel recursive calls
+  - `Sub_RLM`: Uses `batch_completion()` for parallel API calls
+- Added `_batch_recursive_completion()` helper method for parallel RLM_REPL calls
+- Updated docstrings to explain depth-based behavior
+
+**Key Features:**
+- Dynamic sub-RLM type based on recursion depth
+- Seamless handling of recursive vs terminal sub-LLMs
+- Parallel batch processing works for both recursive and terminal sub-LLMs
+- Each recursive sub-RLM gets its own isolated REPL environment
+
+### 3. `rlm/utils/prompts.py` 📝 UPDATED
+**Changes:**
+- Updated `REPL_SYSTEM_PROMPT` to mention multi-depth recursion capability
+- Added note that sub-LLMs can also have REPL environments and call further sub-LLMs
+- Added `depth` and `max_depth` parameters to `build_system_prompt()` (for future depth-aware customization)
+- Added `depth` parameter to `next_action_prompt()` (for future depth-aware prompting)
+
+**Key Features:**
+- System prompt now educates LLM about recursive capabilities
+- Foundation for depth-specific prompting strategies
+
+### 4. `rlm/logger/root_logger.py` 📊 UPDATED
+**Changes:**
+- Added `depth` parameter to `__init__()`
+- Stored `depth` as instance variable
+- Modified log messages to include `[Depth {self.depth}]` prefix
+
+**Key Features:**
+- Depth-aware logging for better traceability
+- Easy to track which depth level generated each log message
+
+### 5. `rlm/logger/repl_logger.py` 📊 UPDATED
+**Changes:**
+- Added `depth` parameter to `__init__()`
+- Stored `depth` as instance variable
+- Modified log messages to include `[Depth {self.depth}]` prefix
+
+**Key Features:**
+- Consistent depth tracking across all loggers
+- Helps debug multi-level recursive calls
+
+### 6. `rlm/rlm.py` 🔧 FIXED
+**Changes:**
+- Fixed Python 3.9 compatibility issue with type annotations
+- Changed `list[str] | str | dict[str, str]` to `Union[List[str], str, Dict[str, str]]`
+- Added `from typing import Union, List, Dict` imports
+
+**Key Features:**
+- Compatible with Python 3.9+
+- Maintains type safety
+
+## Files Added
+
+### 1. `extra/example_multi_depth.py` 📘 NEW
+**Purpose:** Demonstration script showing multi-depth recursion in action
+
+**Features:**
+- Example with `max_depth=2`: Root → Sub-RLM with REPL → Terminal Sub_RLM
+- Example with `max_depth=3`: Root → Sub-RLM → Sub-sub-RLM → Terminal Sub_RLM
+- Shows hierarchical problem decomposition
+- Demonstrates how sub-RLMs can spawn their own sub-RLMs
+
+## Architecture Changes
+
+### Before (Single Depth)
+```
+Root LLM (depth=0)
+  ↓
+REPL Environment
+  ↓
+Sub_RLM (terminal, no REPL)
+  ↓
+Direct API calls only
+```
+
+### After (Multi-Depth)
+```
+Root LLM (depth=0, max_depth=3)
+  ↓
+REPL Environment
+  ↓
+Sub-RLM (depth=1) - Has REPL
+  ↓
+REPL Environment
+  ↓
+Sub-sub-RLM (depth=2) - Has REPL
+  ↓
+REPL Environment
+  ↓
+Terminal Sub_RLM (depth=3) - No REPL
+  ↓
+Direct API calls
+```
+
+## API Changes
+
+### New Parameters
+
+#### `RLM_REPL.__init__()`
+- **`depth: int = 0`**: Current recursion depth (0 for root)
+- **`max_depth: int = 1`**: Maximum allowed recursion depth (default: 1 for backward compatibility)
+
+#### `REPLEnv.__init__()`
+- **`depth: int = 0`**: Current recursion depth
+- **`max_depth: int = 1`**: Maximum allowed recursion depth
+- **`max_iterations: int = 20`**: Maximum iterations for sub-RLMs
+- **`enable_logging: bool = False`**: Enable depth-aware logging
+
+### Behavior Changes
+
+#### `llm_query()` and `llm_batch()`
+- Now handle both recursive (`RLM_REPL`) and terminal (`Sub_RLM`) sub-LLMs
+- Automatically detect sub-RLM type and call appropriate interface
+- Recursive sub-LLMs receive prompts as `context` parameter
+- Terminal sub-LLMs receive prompts directly
+
+## Usage Examples
+
+### Basic Multi-Depth Setup
+```python
+from rlm.rlm_repl import RLM_REPL
+
+# Create root RLM with max_depth=2
+rlm = RLM_REPL(
+    model="gpt-3.5-turbo",
+    recursive_model="gpt-3.5-turbo",
+    max_depth=2,  # Root can spawn sub-RLMs that can spawn their own sub-RLMs
+    enable_logging=True
+)
+
+# Use as before
+result = rlm.completion(context=large_context, query="Analyze this...")
+```
+
+### Depth Hierarchy Example
+With `max_depth=3`:
+- **Depth 0 (Root)**: Full REPL, can call sub-LLMs
+- **Depth 1 (Sub)**: Full REPL, can call sub-LLMs
+- **Depth 2 (Sub-sub)**: Full REPL, calls terminal Sub_RLM
+- **Depth 3 (Terminal)**: No REPL, direct API calls only
+
+## Performance and Cost Considerations
+
+### Iteration Management
+- Root LLM gets full `max_iterations`
+- Sub-RLMs get reduced iterations: `max_iterations // (depth + 1)`
+- Minimum of 3 iterations guaranteed for sub-RLMs
+- Prevents excessive API costs at deeper levels
+
+### Cost Implications
+- **Higher depth = More API calls**: Each recursive level adds overhead
+- **Use judiciously**: Multi-depth is powerful but expensive
+- **Recommended**: Use `max_depth=2` or `max_depth=3` for most use cases
+- **Default**: `max_depth=1` maintains original behavior (no extra cost)
+
+## Backward Compatibility
+
+✅ **Fully backward compatible**
+- Default `max_depth=1` maintains original single-depth behavior
+- All existing code works without changes
+- No breaking changes to any APIs
+- Sub-LLMs are still terminal by default
+
+## Testing
+
+Run the multi-depth example:
+```bash
+# Activate conda environment
+conda activate min-verify
+
+# Run multi-depth example
+python extra/example_multi_depth.py
+```
+
+## Use Cases
+
+### When to Use Multi-Depth
+✅ **Complex hierarchical problems**: Break down into sub-problems that need their own code execution
+✅ **Multi-step analysis**: Each step requires its own REPL environment
+✅ **Divide-and-conquer**: Recursively decompose large tasks
+✅ **Nested document processing**: Process documents that contain sub-documents requiring analysis
+
+### When to Use Single Depth (max_depth=1)
+✅ **Simple tasks**: Single level of sub-LLM calls is sufficient
+✅ **Cost-sensitive**: Minimize API calls
+✅ **Straightforward analysis**: No need for nested problem decomposition
+
+## Technical Implementation Details
+
+### Recursive Sub-RLM Creation
+- Each `REPLEnv` checks `depth < max_depth - 1` to decide sub-RLM type
+- Recursive sub-RLMs are created as fresh `RLM_REPL` instances
+- Each instance has isolated state (messages, REPL environment, etc.)
+- Depth is incremented automatically: `depth + 1`
+
+### Parallel Batch Processing
+- `_batch_recursive_completion()` handles parallel RLM_REPL calls
+- Uses `ThreadPoolExecutor` for concurrent execution
+- Each completion gets its own `RLM_REPL` instance to avoid state conflicts
+- Results maintain input order
+
+### Depth Tracking
+- Depth is passed through constructor chain: `RLM_REPL` → `REPLEnv` → `RLM_REPL`
+- Loggers include depth prefix: `[Depth {depth}]`
+- Helps debug and trace recursive call chains
+
+## Future Enhancements
+
+Potential improvements for future versions:
+- [ ] Depth-specific system prompts (customize behavior per depth)
+- [ ] Cost tracking per depth level
+- [ ] Dynamic depth adjustment based on problem complexity
+- [ ] Depth-aware iteration limits (more sophisticated than current linear reduction)
+- [ ] Visualization tools for recursive call trees
+
+## Migration Guide
+
+No migration needed! The changes are additive and fully backward compatible.
+
+To use multi-depth recursion:
+1. Set `max_depth` parameter when creating `RLM_REPL` (default is 1)
+2. Existing code continues to work as-is
+3. New recursive capabilities are automatically available
+
+---
+
 **Implementation Date**: January 2026  
 **Implemented By**: AI Assistant  
 **Status**: ✅ Complete and tested

@@ -5,19 +5,30 @@ import json
 import tempfile
 import os
 import time
+import asyncio
+import concurrent.futures
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 
 from rlm import RLM
 
-# Simple sub LM for REPL environment. Note: This could also be just the RLM itself!
+# Use TYPE_CHECKING to avoid circular imports
+if TYPE_CHECKING:
+    from rlm.rlm_repl import RLM_REPL
+
+
+# Simple sub LM for REPL environment - TERMINAL node (no REPL, no further recursion)
 class Sub_RLM(RLM):
-    """Recursive LLM client for REPL environment with fixed configuration."""
+    """
+    Terminal LLM client for REPL environment.
+    This is a simple API wrapper without REPL capabilities.
+    Used as the final depth level where no further recursion is allowed.
+    """
     
-    def __init__(self, model: str = "gpt-5"):
+    def __init__(self, model: str = "gpt-5", api_key: Optional[str] = None):
         # Configuration - model can be specified
-        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY environment variable is required")
         
@@ -95,22 +106,63 @@ class REPLResult:
         return f"REPLResult(stdout={self.stdout}, stderr={self.stderr}, locals={self.locals}, execution_time={self.execution_time})"
 
 class REPLEnv:
+    """
+    REPL Environment for executing Python code with LLM query capabilities.
+    
+    Supports multi-depth recursion:
+    - If depth < max_depth - 1: sub_rlm is an RLM_REPL (has its own REPL)
+    - If depth >= max_depth - 1: sub_rlm is a Sub_RLM (terminal, no REPL)
+    """
+    
     def __init__(
         self,
         recursive_model: str = "gpt-5-mini",
         context_json: Optional[dict | list] = None,
         context_str: Optional[str] = None,
         setup_code: str = None,
+        depth: int = 0,
+        max_depth: int = 1,
+        max_iterations: int = 20,
+        api_key: Optional[str] = None,
+        enable_logging: bool = False,
     ):
+        # Store depth info
+        self.depth = depth
+        self.max_depth = max_depth
+        self.max_iterations_per_depth = max_iterations
+        self.api_key = api_key
+        self.enable_logging = enable_logging
+        self.recursive_model = recursive_model
+        
         # Store the original working directory
         self.original_cwd = os.getcwd()
         
         # Create temporary directory (but don't change global working directory)
-        self.temp_dir = tempfile.mkdtemp(prefix="repl_env_")
+        self.temp_dir = tempfile.mkdtemp(prefix=f"repl_env_d{depth}_")
 
-
-        # Initialize minimal RLM / LM client. Change this to support more depths.
-        self.sub_rlm: RLM = Sub_RLM(model=recursive_model)
+        # Initialize sub_rlm based on depth
+        # If we can go deeper (depth < max_depth - 1), create RLM_REPL with REPL capabilities
+        # Otherwise, create terminal Sub_RLM (simple API call, no REPL)
+        if depth < max_depth - 1:
+            # Sub-RLM gets its own REPL environment and can recurse further
+            # Import here to avoid circular imports
+            from rlm.rlm_repl import RLM_REPL
+            self.sub_rlm: RLM = RLM_REPL(
+                api_key=api_key,
+                model=recursive_model,
+                recursive_model=recursive_model,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_iterations=max_iterations,  # Pass parent's max_iterations so sub-RLM can calculate reduced value
+                enable_logging=enable_logging,
+            )
+            self._sub_rlm_is_recursive = True
+            print(f"[Depth {depth}] Created recursive sub_rlm (RLM_REPL at depth {depth + 1})")
+        else:
+            # Terminal node - simple API call, no REPL
+            self.sub_rlm: RLM = Sub_RLM(model=recursive_model, api_key=api_key)
+            self._sub_rlm_is_recursive = False
+            print(f"[Depth {depth}] Created terminal sub_rlm (Sub_RLM - no REPL)")
         
         # Create safe globals with only string-safe built-ins
         self.globals = {
@@ -193,8 +245,19 @@ class REPLEnv:
         self.load_context(context_json, context_str)
         
         def llm_query(prompt: str) -> str:
-            """Query the LLM with the given prompt."""
-            return self.sub_rlm.completion(prompt)
+            """
+            Query the LLM with the given prompt.
+            
+            If sub_rlm is RLM_REPL (recursive), the prompt is used as both context and query.
+            If sub_rlm is Sub_RLM (terminal), the prompt is sent directly to the API.
+            """
+            if self._sub_rlm_is_recursive:
+                # RLM_REPL.completion(context, query) - use prompt as context, extract query
+                # The sub-RLM will use its own REPL environment to process this
+                return self.sub_rlm.completion(context=prompt, query="Process this and provide your answer.")
+            else:
+                # Sub_RLM.completion(prompt) - direct API call
+                return self.sub_rlm.completion(prompt)
         
         def llm_batch(prompts: List[str], max_concurrent: int = 10) -> List[str]:
             """
@@ -211,7 +274,13 @@ class REPLEnv:
                 prompts = [f"Summarize: {chunk}" for chunk in chunks]
                 results = llm_batch(prompts)
             """
-            return self.sub_rlm.batch_completion(prompts, max_concurrent=max_concurrent)
+            if self._sub_rlm_is_recursive:
+                # For recursive RLM_REPL, we need to run completions in parallel
+                # Each completion uses its own REPL environment
+                return self._batch_recursive_completion(prompts, max_concurrent)
+            else:
+                # For terminal Sub_RLM, use the async batch completion
+                return self.sub_rlm.batch_completion(prompts, max_concurrent=max_concurrent)
         
         # Add (R)LM query functions to globals
         self.globals['llm_query'] = llm_query
@@ -240,6 +309,50 @@ class REPLEnv:
         # Finally, run any setup code if provided
         if setup_code:
             self.code_execution(setup_code)
+    
+    def _batch_recursive_completion(self, prompts: List[str], max_concurrent: int = 10) -> List[str]:
+        """
+        Run multiple RLM_REPL completions in parallel using ThreadPoolExecutor.
+        
+        Each completion creates its own RLM_REPL instance to avoid state conflicts.
+        """
+        from rlm.rlm_repl import RLM_REPL
+        
+        def run_single_completion(prompt: str) -> str:
+            """Run a single RLM_REPL completion in a thread."""
+            try:
+                # Create a fresh RLM_REPL instance for this completion
+                rlm = RLM_REPL(
+                    api_key=self.api_key,
+                    model=self.recursive_model,
+                    recursive_model=self.recursive_model,
+                    depth=self.depth + 1,
+                    max_depth=self.max_depth,
+                    max_iterations=self.max_iterations_per_depth,  # Pass parent's max_iterations
+                    enable_logging=self.enable_logging,
+                )
+                return rlm.completion(context=prompt, query="Process this and provide your answer.")
+            except Exception as e:
+                return f"Error in recursive completion: {str(e)}"
+        
+        # Run completions in parallel using ThreadPoolExecutor
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            future_to_idx = {
+                executor.submit(run_single_completion, prompt): i 
+                for i, prompt in enumerate(prompts)
+            }
+            
+            # Collect results in order
+            results = [None] * len(prompts)
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    results[idx] = f"Error: {str(e)}"
+        
+        return results
     
     def load_context(self, context_json: Optional[dict | list] = None, context_str: Optional[str] = None):
         # Write context JSON to temporary directory using absolute (temp dir) path

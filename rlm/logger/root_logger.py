@@ -31,19 +31,25 @@ class ColorfulLogger:
         'BG_CYAN': '\033[46m',
     }
     
-    def __init__(self, enabled: bool = True):
+    def __init__(self, enabled: bool = True, depth: int = 0):
         """
         Initialize the colorful logger.
         
         Args:
             enabled: Whether console logging is enabled
+            depth: Current recursion depth (for multi-depth RLM)
         """
         self.enabled = enabled
+        self.depth = depth
         self.conversation_step = 0
         self.last_messages_length = 0
         self.current_query = ""
         self.session_start_time = None
-        self.current_depth = 0
+        self.current_depth = depth
+        
+        # Depth-based indentation for visual hierarchy
+        self._indent = "  " * depth
+        self._depth_prefix = f"[D{depth}] " if depth > 0 else ""
         
     def _colorize(self, text: str, color: str) -> str:
         """Apply color to text if logging is enabled."""

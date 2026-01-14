@@ -16,12 +16,16 @@ class CodeExecution:
     execution_time: Optional[float] = None
 
 class REPLEnvLogger:
-    def __init__(self, max_output_length: int = 2000, enabled: bool = True):
+    def __init__(self, max_output_length: int = 2000, enabled: bool = True, depth: int = 0):
         self.enabled = enabled
+        self.depth = depth
         self.console = Console()
         self.executions: List[CodeExecution] = []
         self.execution_count = 0
         self.max_output_length = max_output_length
+        
+        # Depth-based prefix for visual hierarchy
+        self._depth_prefix = f"[D{depth}] " if depth > 0 else ""
     
     def _truncate_output(self, text: str) -> str:
         """Truncate text output to prevent overwhelming console output."""
