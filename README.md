@@ -35,7 +35,7 @@ prompts = [f"Analyze: {chunk}" for chunk in chunks]
 results = llm_batch(prompts)  # 3x faster!
 ```
 
-See [ASYNC_BATCH_GUIDE.md](ASYNC_BATCH_GUIDE.md) for detailed documentation and examples.
+See [ASYNC_BATCH_GUIDE.md](docs/ASYNC_BATCH_GUIDE.md) for detailed documentation and examples.
 
 ## Basic Example
 We have all the basic dependencies in `requirements.txt`, although none are really necessary if you change your implementation (`openai` for LM API calls, `python-dotenv` for .env loading, and `rich` for logging).
@@ -44,7 +44,7 @@ In `main.py`, we have a basic needle-in-the-haystack (NIAH) example that embeds 
 
 To see the new batch processing in action, run:
 ```bash
-python example_batch.py
+python extra/example_batch.py
 ```
 
 ## Code Structure
