@@ -70,6 +70,8 @@ class RLM_REPL(RLM):
                  # New naming parameters
                  parent_name: str = "",
                  spawn_id: str = "",
+                 # Buffered mode for ordered output in parallel execution
+                 buffered: bool = False,
                  ):
         self.api_key = api_key
         self.model = model
@@ -89,6 +91,9 @@ class RLM_REPL(RLM):
         # Track current iteration for child spawn naming
         self.current_iteration = 0
         
+        # Buffered mode - for sub-LLMs running in parallel
+        self.buffered = buffered
+        
         # Adjust iterations based on depth (deeper = fewer iterations to save cost)
         # Root gets full iterations, sub-levels get progressively fewer
         if depth == 0:
@@ -97,27 +102,27 @@ class RLM_REPL(RLM):
             # Reduce iterations for deeper levels: max_iterations // (depth + 1)
             self._max_iterations = max(3, max_iterations // (depth + 1))
         
-        # Initialize colorful logger with instance name
+        # Initialize colorful logger with instance name (buffered for sub-LLMs)
         self.logger = ColorfulLogger(
             enabled=enable_logging, 
             depth=depth,
             max_depth=max_depth,
             instance_name=self.instance_name,
             max_iterations=self._max_iterations,
+            buffered=buffered,
         )
         self.repl_env_logger = REPLEnvLogger(
             enabled=enable_logging, 
             depth=depth,
             instance_name=self.instance_name,
+            buffered=buffered,
         )
         
         self.messages = [] # Initialize messages list
         self.query = None
         self.enable_logging = enable_logging
         
-        # Log depth info
-        if enable_logging:
-            print(f"[{self.instance_name}] RLM_REPL initialized (depth={depth}, max_depth={max_depth}, iterations={self._max_iterations})")
+        # Log depth info (initialization is now shown via logger)
     
     def setup_context(self, context: List[str] | str | List[Dict[str, str]], query: Optional[str] = None):
         """
@@ -175,12 +180,9 @@ class RLM_REPL(RLM):
             
             # Log iteration start
             self.logger.log_iteration_start(iteration)
-            print(f"[{self.instance_name}] Iteration {iteration}/{self._max_iterations}")
             
             # Query root LM to interact with REPL environment
             response = self.llm.completion(self.messages + [next_action_prompt(query, iteration)])
-
-            print(f"[{self.instance_name}] Response: {response}")
             
             # Check for code blocks
             code_blocks = utils.find_code_blocks(response)
@@ -208,13 +210,16 @@ class RLM_REPL(RLM):
                 return final_answer
 
             
-        # If we reach here, no final answer was found in any iteration
-        print(f"[{self.instance_name}] No final answer found in any iteration")
+        # If we reach here, no final answer was found in any iteration - force final response
         self.messages.append(next_action_prompt(query, iteration, final_answer=True))
         final_answer = self.llm.completion(self.messages)
         self.logger.log_final_response(final_answer)
 
         return final_answer
+    
+    def get_log_buffer(self) -> str:
+        """Get all buffered log output (for ordered printing in parallel execution)."""
+        return self.logger.get_buffer() + self.repl_env_logger.get_buffer()
     
     def cost_summary(self) -> Dict[str, Any]:
         """Get the cost summary of the Root LM + Sub-RLM Calls."""

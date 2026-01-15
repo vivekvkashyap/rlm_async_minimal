@@ -1,45 +1,64 @@
 """
 Root (colorful) logger for RLM client that tracks model outputs and message changes.
+Uses Rich library for beautiful output with thread-safe printing.
 
-Naming Convention:
-- Root LLM: Main LLM at depth 0 with REPL (e.g., "Root LLM")
-- Sub Root LLM: RLM_REPL spawned by parent, has REPL (e.g., "Sub Root LLM 00", "Sub Root LLM 00.a")
-- Sub LLM: Terminal Sub_RLM without REPL (e.g., "Sub LLM 00", "Sub LLM 00.a")
+Supports buffered mode for collecting output that can be printed later in order.
 """
 
 from typing import List, Dict, Optional
 from datetime import datetime
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
+from rich.syntax import Syntax
+from rich import box
+from rich.rule import Rule
+import threading
+import sys
+import io
+
+# Global lock for thread-safe console printing
+_print_lock = threading.Lock()
+
+# Store the REAL stdout at module load time
+_real_stdout = sys.__stdout__
+
+
+def get_llm_style(depth: int, instance_name: str):
+    """Get style configuration based on LLM type."""
+    if depth == 0:
+        return {
+            'color': 'bright_green',
+            'border': 'green',
+            'box': box.DOUBLE,
+            'emoji': '🟢',
+            'char': '═',
+        }
+    elif 'Sub Root' in instance_name:
+        return {
+            'color': 'bright_cyan',
+            'border': 'cyan',
+            'box': box.ROUNDED,
+            'emoji': '🔵',
+            'char': '─',
+        }
+    else:
+        return {
+            'color': 'bright_magenta',
+            'border': 'magenta',
+            'box': box.SIMPLE,
+            'emoji': '🟣',
+            'char': '·',
+        }
 
 
 class ColorfulLogger:
     """
-    A colorful logger that tracks RLM client interactions with the model.
+    A colorful logger using Rich library for beautiful, thread-safe output.
     
-    Supports hierarchical naming:
-    - Root LLM (depth=0, iter=X/Y, current_iter=Z)
-    - Sub Root LLM 00 (depth=1, iter=X/Y, current_iter=Z)
-    - Sub Root LLM 00.a (depth=2, iter=X/Y, current_iter=Z)
+    Supports buffered mode: when buffered=True, output is collected and can be
+    retrieved with get_buffer() for printing later in a specific order.
     """
-    
-    # ANSI color codes
-    COLORS = {
-        'RESET': '\033[0m',
-        'BOLD': '\033[1m',
-        'DIM': '\033[2m',
-        'RED': '\033[31m',
-        'GREEN': '\033[32m',
-        'YELLOW': '\033[33m',
-        'BLUE': '\033[34m',
-        'MAGENTA': '\033[35m',
-        'CYAN': '\033[36m',
-        'WHITE': '\033[37m',
-        'BG_RED': '\033[41m',
-        'BG_GREEN': '\033[42m',
-        'BG_YELLOW': '\033[43m',
-        'BG_BLUE': '\033[44m',
-        'BG_MAGENTA': '\033[45m',
-        'BG_CYAN': '\033[46m',
-    }
     
     def __init__(
         self, 
@@ -48,55 +67,59 @@ class ColorfulLogger:
         max_depth: int = 3,
         instance_name: str = "Root LLM",
         max_iterations: int = 20,
+        buffered: bool = False,  # NEW: Buffer mode for ordered output
     ):
-        """
-        Initialize the colorful logger.
-        
-        Args:
-            enabled: Whether console logging is enabled
-            depth: Current recursion depth (for multi-depth RLM)
-            max_depth: Maximum recursion depth allowed
-            instance_name: Name of this LLM instance (e.g., "Root LLM", "Sub Root LLM 0-0")
-            max_iterations: Maximum iterations for this instance
-        """
         self.enabled = enabled
         self.depth = depth
         self.max_depth = max_depth
         self.instance_name = instance_name
         self.max_iterations = max_iterations
         self.current_iteration = 0
-        
         self.conversation_step = 0
-        self.last_messages_length = 0
         self.current_query = ""
         self.session_start_time = None
-        self.current_depth = depth
         
-        # Depth-based indentation for visual hierarchy
-        self._indent = "  " * depth
-        self._build_prefix()
-    
-    def _build_prefix(self) -> str:
-        """Build the prefix string with instance name and iteration info."""
-        self._prefix = f"[{self.instance_name} | depth={self.depth}/{self.max_depth} | iter={self.current_iteration}/{self.max_iterations}]"
-        return self._prefix
+        # Buffered mode - collect output instead of printing immediately
+        self.buffered = buffered
+        self._output_buffer = io.StringIO() if buffered else None
+        
+        # Get style for this LLM type
+        self.style = get_llm_style(depth, instance_name)
     
     def update_iteration(self, current_iteration: int):
-        """Update the current iteration and rebuild prefix."""
+        """Update the current iteration."""
         self.current_iteration = current_iteration
-        self._build_prefix()
-        
-    def _colorize(self, text: str, color: str) -> str:
-        """Apply color to text if logging is enabled."""
-        if not self.enabled:
-            return text
-        return f"{self.COLORS[color]}{text}{self.COLORS['RESET']}"
     
-    def _print_separator(self, char: str = "=", color: str = "CYAN"):
-        """Print a colored separator line."""
-        if self.enabled:
-            separator = char * 80
-            print(self._colorize(self._indent + separator, color))
+    def get_buffer(self) -> str:
+        """Get the buffered output (only in buffered mode)."""
+        if self._output_buffer:
+            return self._output_buffer.getvalue()
+        return ""
+    
+    def clear_buffer(self):
+        """Clear the output buffer."""
+        if self._output_buffer:
+            self._output_buffer = io.StringIO()
+    
+    def _render_to_string(self, render_func) -> str:
+        """Render to a string buffer."""
+        buffer = io.StringIO()
+        buffer_console = Console(file=buffer, force_terminal=True, width=120)
+        render_func(buffer_console)
+        return buffer.getvalue()
+    
+    def _output(self, render_func):
+        """Output rendered content - either buffer it or print atomically."""
+        output = self._render_to_string(render_func)
+        
+        if self.buffered:
+            # Collect in buffer for later
+            self._output_buffer.write(output)
+        else:
+            # Print atomically to real stdout
+            with _print_lock:
+                _real_stdout.write(output)
+                _real_stdout.flush()
     
     def log_query_start(self, query: str):
         """Log the start of a new query."""
@@ -105,46 +128,60 @@ class ColorfulLogger:
             
         self.current_query = query
         self.conversation_step = 0
-        self.last_messages_length = 0
         self.session_start_time = datetime.now()
-        self.current_depth = 0
         
-        self._print_separator("=", "GREEN")
-        print(self._indent + self._colorize(f"STARTING NEW QUERY - {self._prefix}", "BOLD") + 
-              self._colorize(" | ", "DIM") + 
-              self._colorize(datetime.now().strftime("%H:%M:%S"), "DIM"))
-        self._print_separator("=", "GREEN")
+        def render(console):
+            header = Text()
+            header.append(f"{self.style['emoji']} {self.instance_name}", style=f"bold {self.style['color']}")
+            header.append(f" (depth {self.depth} of {self.max_depth})", style="dim")
+            header.append(f" | {datetime.now().strftime('%H:%M:%S')}", style="dim italic")
+            
+            query_display = query[:300] + "..." if len(query) > 300 else query
+            
+            content = Text()
+            content.append("📋 QUERY: ", style="bold")
+            content.append(query_display)
+            
+            panel = Panel(
+                content,
+                title=header,
+                title_align="left",
+                border_style=self.style['border'],
+                box=self.style['box'],
+            )
+            
+            console.print()
+            console.print(panel)
         
-        print(self._indent + self._colorize("QUERY:", "BOLD") + f" {query}")
-        print()
+        self._output(render)
     
     def log_initial_messages(self, messages: List[Dict[str, str]]):
         """Log the initial messages setup."""
         if not self.enabled:
             return
-            
-        print(self._indent + self._colorize(f"INITIAL MESSAGES SETUP - {self._prefix}:", "BOLD"))
-        for i, msg in enumerate(messages):
-            role = msg.get('role', 'unknown')
-            content = msg.get('content', '')
-            
-            # Truncate very long content for readability
-            if len(content) > 2000:
-                content = content[:2000] + "..."
-            
-            role_color = "BLUE" if role == "user" else "MAGENTA" if role == "assistant" else "YELLOW"
-            print(self._indent + f"  {self._colorize(f'[{i+1}] {role.upper()}:', role_color)} {content}")
         
-        print()
-        self.last_messages_length = len(messages)
+        def render(console):
+            console.print(Text(f"   📝 Initial Messages: {len(messages)} message(s) loaded", style="dim"))
+        
+        self._output(render)
     
     def log_iteration_start(self, iteration: int):
-        """Log the start of a new iteration."""
+        """Log the start of a new iteration with a box."""
         if not self.enabled:
             return
         
         self.update_iteration(iteration)
-        print(self._indent + self._colorize(f"--- {self._prefix} ---", "CYAN"))
+        
+        def render(console):
+            iter_text = Text()
+            iter_text.append(f"🔄 ITERATION {iteration}/{self.max_iterations}", style=f"bold {self.style['color']}")
+            iter_text.append(f" [{self.instance_name}]", style="bold")
+            iter_text.append(f" (depth {self.depth} of {self.max_depth})", style="dim")
+            
+            console.print()
+            console.print(Rule(iter_text, style=self.style['border'], characters=self.style['char']))
+        
+        self._output(render)
     
     def log_model_response(self, response: str, has_tool_calls: bool):
         """Log the model's response."""
@@ -152,47 +189,86 @@ class ColorfulLogger:
             return
             
         self.conversation_step += 1
+        step = self.conversation_step
         
-        print(self._indent + self._colorize(f"MODEL RESPONSE - {self._prefix} (Step {self.conversation_step}):", "BOLD"))
+        def render(console):
+            display_response = response[:400] + "..." if len(response) > 400 else response
+            
+            content = Text()
+            content.append(display_response)
+            
+            if has_tool_calls:
+                subtitle = Text("⚡ Contains tool calls - will execute", style="bold yellow")
+            else:
+                subtitle = Text("✓ No tool calls - processing complete", style="bold green")
+            
+            panel = Panel(
+                content,
+                title=f"[bold]💬 Response (Step {step})[/bold]",
+                subtitle=subtitle,
+                border_style="white",
+                box=box.ROUNDED,
+            )
+            
+            console.print(panel)
         
-        # Truncate very long responses for readability
-        display_response = response
-        if len(response) > 500:
-            display_response = response[:500] + "..."
-        
-        print(self._indent + f"  {self._colorize('Response:', 'CYAN')} {display_response}")
-        
-        if has_tool_calls:
-            print(self._indent + self._colorize("  Contains tool calls - will execute them", "YELLOW"))
-        else:
-            print(self._indent + self._colorize("  No tool calls - final response", "GREEN"))
-        
-        print()
+        self._output(render)
     
     def log_tool_execution(self, tool_call_str: str, tool_result: str):
         """Log tool execution and result."""
         if not self.enabled:
             return
+        
+        def render(console):
+            display_result = tool_result[:300] + "..." if len(tool_result) > 300 else tool_result
             
-        print(self._indent + self._colorize(f"TOOL EXECUTION - {self._prefix}:", "BOLD"))
-        print(self._indent + f"  {self._colorize('Call:', 'YELLOW')} {tool_call_str}")
+            content = Text()
+            content.append("🔧 Tool: ", style="bold yellow")
+            content.append(f"{tool_call_str}\n", style="yellow")
+            content.append("📤 Result: ", style="bold green")
+            content.append(display_result)
+            
+            console.print(Panel(content, title="[bold cyan]⚙️ Tool Execution[/bold cyan]", border_style="cyan", box=box.ROUNDED))
         
-        # Truncate very long results for readability
-        display_result = tool_result
-        if len(tool_result) > 300:
-            display_result = tool_result[:300] + "..."
-        
-        print(self._indent + f"  {self._colorize('Result:', 'GREEN')} {display_result}")
-        print()
+        self._output(render)
     
     def log_final_response(self, response: str):
-        """Log the final response from the model."""
+        """Log the final response with a prominent box."""
         if not self.enabled:
             return
+        
+        def render(console):
+            display = response[:2000] + "..." if len(response) > 2000 else response
             
-        self._print_separator("=", "GREEN")
-        print(self._indent + self._colorize(f"FINAL RESPONSE - {self._prefix}:", "BOLD"))
-        self._print_separator("=", "GREEN")
-        print(self._indent + response)
-        self._print_separator("=", "GREEN")
-        print()
+            panel = Panel(
+                Text(display),
+                title=f"[bold white on green] ✅ FINAL ANSWER [{self.instance_name}] [/bold white on green]",
+                border_style="bold green",
+                box=box.DOUBLE,
+                padding=(1, 2),
+            )
+            
+            console.print()
+            console.print(Rule(style="green", characters="═"))
+            console.print(panel)
+            console.print(Rule(style="green", characters="═"))
+            console.print()
+        
+        self._output(render)
+    
+    def log_iteration_end(self):
+        """Log the end of an iteration."""
+        if not self.enabled:
+            return
+        
+        def render(console):
+            console.print(Rule(style="dim", characters="─"))
+        
+        self._output(render)
+
+
+def flush_buffer_to_stdout(buffer_content: str):
+    """Flush buffered content to stdout atomically."""
+    with _print_lock:
+        _real_stdout.write(buffer_content)
+        _real_stdout.flush()

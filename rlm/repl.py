@@ -85,9 +85,6 @@ class Sub_RLM(RLM):
         self.client = OpenAIClient(api_key=self.api_key, model=model)
         self.async_client = AsyncOpenAIClient(api_key=self.api_key, model=model)
         
-        if enable_logging:
-            print(f"[{self.instance_name}] Sub_RLM initialized (depth={depth}, terminal - no REPL)")
-        
     
     def completion(self, prompt) -> str:
         """
@@ -216,13 +213,11 @@ class REPLEnv:
             # Sub-RLMs will be created on-demand with proper naming
             self._sub_rlm_is_recursive = True
             self.sub_rlm = None  # Will be created per-call with proper naming
-            print(f"[{parent_instance_name}] REPLEnv initialized - will spawn Sub Root LLMs on demand (depth {depth + 1})")
         else:
             # Terminal node - create a single Sub_RLM for efficiency
             # The spawn_id will be set when first used
             self._sub_rlm_is_recursive = False
             self.sub_rlm = None  # Will be created on-demand with proper naming
-            print(f"[{parent_instance_name}] REPLEnv initialized - will spawn Sub LLMs on demand (terminal - no REPL)")
         
         # Create safe globals with only string-safe built-ins
         self.globals = {
@@ -479,8 +474,10 @@ class REPLEnv:
         Run multiple RLM_REPL completions in parallel using ThreadPoolExecutor.
         
         Each completion creates its own RLM_REPL instance to avoid state conflicts.
+        Uses buffered mode to collect output and print in order after all complete.
         """
         from rlm.rlm_repl import RLM_REPL
+        from rlm.logger.root_logger import flush_buffer_to_stdout
         
         # Pre-generate all spawn IDs first (thread-safe)
         spawn_ids = []
@@ -499,11 +496,11 @@ class REPLEnv:
                     depth=self.depth + 1,
                 ))
         
-        def run_single_completion(args) -> str:
-            """Run a single RLM_REPL completion in a thread."""
+        def run_single_completion(args):
+            """Run a single RLM_REPL completion in a thread. Returns (result, log_buffer)."""
             prompt, spawn_id = args
             try:
-                # Create a fresh RLM_REPL instance for this completion with proper naming
+                # Create a fresh RLM_REPL instance with BUFFERED logging
                 rlm = RLM_REPL(
                     api_key=self.api_key,
                     model=self.recursive_model,
@@ -514,13 +511,16 @@ class REPLEnv:
                     enable_logging=self.enable_logging,
                     parent_name=self.parent_instance_name,
                     spawn_id=spawn_id,
+                    buffered=True,  # Enable buffered mode
                 )
-                return rlm.completion(context=prompt, query="Process this and provide your answer.")
+                result = rlm.completion(context=prompt, query="Process this and provide your answer.")
+                log_buffer = rlm.get_log_buffer()  # Get all buffered logs
+                return (result, log_buffer)
             except Exception as e:
-                return f"Error in recursive completion: {str(e)}"
+                return (f"Error in recursive completion: {str(e)}", "")
         
         # Run completions in parallel using ThreadPoolExecutor
-        results = []
+        results_with_logs = [None] * len(prompts)
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
             future_to_idx = {
                 executor.submit(run_single_completion, (prompt, spawn_id)): i 
@@ -528,13 +528,19 @@ class REPLEnv:
             }
             
             # Collect results in order
-            results = [None] * len(prompts)
             for future in concurrent.futures.as_completed(future_to_idx):
                 idx = future_to_idx[future]
                 try:
-                    results[idx] = future.result()
+                    results_with_logs[idx] = future.result()
                 except Exception as e:
-                    results[idx] = f"Error: {str(e)}"
+                    results_with_logs[idx] = (f"Error: {str(e)}", "")
+        
+        # NOW print all logs in order (after all parallel executions complete)
+        results = []
+        for result, log_buffer in results_with_logs:
+            if log_buffer:
+                flush_buffer_to_stdout(log_buffer)
+            results.append(result)
         
         return results
     
