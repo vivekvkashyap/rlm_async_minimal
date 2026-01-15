@@ -166,7 +166,7 @@ class ColorfulLogger:
         self._output(render)
     
     def log_iteration_start(self, iteration: int):
-        """Log the start of a new iteration with a box."""
+        """Log the start of a new iteration with a prominent box for root LLM."""
         if not self.enabled:
             return
         
@@ -179,7 +179,15 @@ class ColorfulLogger:
             iter_text.append(f" (depth {self.depth} of {self.max_depth})", style="dim")
             
             console.print()
-            console.print(Rule(iter_text, style=self.style['border'], characters=self.style['char']))
+            
+            # Root LLM gets a more prominent double-line separator
+            if self.depth == 0:
+                console.print(Rule(style=self.style['border'], characters="═"))
+                console.print(Rule(iter_text, style=self.style['border'], characters=self.style['char']))
+                console.print(Rule(style=self.style['border'], characters="═"))
+            else:
+                # Sub-LLMs get a simpler separator
+                console.print(Rule(iter_text, style=self.style['border'], characters=self.style['char']))
         
         self._output(render)
     
@@ -257,12 +265,48 @@ class ColorfulLogger:
         self._output(render)
     
     def log_iteration_end(self):
-        """Log the end of an iteration."""
+        """Log the end of an iteration with a clear boundary."""
         if not self.enabled:
             return
         
         def render(console):
-            console.print(Rule(style="dim", characters="─"))
+            if self.depth == 0:
+                # Root LLM gets a prominent end marker
+                end_text = Text()
+                end_text.append(f"─── End of Iteration {self.current_iteration} ", style="dim")
+                end_text.append(f"[{self.instance_name}]", style="dim")
+                end_text.append(" ───", style="dim")
+                console.print(Rule(end_text, style="dim", characters="─"))
+            else:
+                console.print(Rule(style="dim", characters="─"))
+        
+        self._output(render)
+    
+    def log_sub_llm_section_start(self, num_sub_llms: int):
+        """Log the start of a section where sub-LLMs will execute."""
+        if not self.enabled:
+            return
+        
+        def render(console):
+            section_text = Text()
+            section_text.append(f"▼ Spawning {num_sub_llms} Sub-LLM(s) ", style="bold cyan")
+            section_text.append(f"[from {self.instance_name}]", style="dim cyan")
+            console.print()
+            console.print(Rule(section_text, style="cyan", characters="·"))
+        
+        self._output(render)
+    
+    def log_sub_llm_section_end(self, num_sub_llms: int):
+        """Log the end of a sub-LLM section."""
+        if not self.enabled:
+            return
+        
+        def render(console):
+            section_text = Text()
+            section_text.append(f"▲ Completed {num_sub_llms} Sub-LLM(s) ", style="bold cyan")
+            section_text.append(f"[returning to {self.instance_name}]", style="dim cyan")
+            console.print(Rule(section_text, style="cyan", characters="·"))
+            console.print()
         
         self._output(render)
 
@@ -271,4 +315,19 @@ def flush_buffer_to_stdout(buffer_content: str):
     """Flush buffered content to stdout atomically."""
     with _print_lock:
         _real_stdout.write(buffer_content)
+        _real_stdout.flush()
+
+
+def print_sub_llm_separator(instance_name: str, index: int, total: int):
+    """Print a separator between sub-LLM outputs for clarity."""
+    with _print_lock:
+        buffer = io.StringIO()
+        console = Console(file=buffer, force_terminal=True, width=120)
+        
+        sep_text = Text()
+        sep_text.append(f"── Sub-LLM {index + 1}/{total} ", style="bold cyan")
+        console.print()
+        console.print(Rule(sep_text, style="cyan", characters="─"))
+        
+        _real_stdout.write(buffer.getvalue())
         _real_stdout.flush()

@@ -475,9 +475,13 @@ class REPLEnv:
         
         Each completion creates its own RLM_REPL instance to avoid state conflicts.
         Uses buffered mode to collect output and print in order after all complete.
+        Output is organized:
+        1. "Spawning X Sub-LLMs" marker
+        2. Each sub-LLM's output in order (with separator)
+        3. "Completed X Sub-LLMs" marker
         """
         from rlm.rlm_repl import RLM_REPL
-        from rlm.logger.root_logger import flush_buffer_to_stdout
+        from rlm.logger.root_logger import flush_buffer_to_stdout, print_sub_llm_separator
         
         # Pre-generate all spawn IDs first (thread-safe)
         spawn_ids = []
@@ -497,7 +501,7 @@ class REPLEnv:
                 ))
         
         def run_single_completion(args):
-            """Run a single RLM_REPL completion in a thread. Returns (result, log_buffer)."""
+            """Run a single RLM_REPL completion in a thread. Returns (result, log_buffer, spawn_id)."""
             prompt, spawn_id = args
             try:
                 # Create a fresh RLM_REPL instance with BUFFERED logging
@@ -515,9 +519,9 @@ class REPLEnv:
                 )
                 result = rlm.completion(context=prompt, query="Process this and provide your answer.")
                 log_buffer = rlm.get_log_buffer()  # Get all buffered logs
-                return (result, log_buffer)
+                return (result, log_buffer, spawn_id)
             except Exception as e:
-                return (f"Error in recursive completion: {str(e)}", "")
+                return (f"Error in recursive completion: {str(e)}", "", spawn_id)
         
         # Run completions in parallel using ThreadPoolExecutor
         results_with_logs = [None] * len(prompts)
@@ -533,11 +537,18 @@ class REPLEnv:
                 try:
                     results_with_logs[idx] = future.result()
                 except Exception as e:
-                    results_with_logs[idx] = (f"Error: {str(e)}", "")
+                    results_with_logs[idx] = (f"Error: {str(e)}", "", spawn_ids[idx])
         
         # NOW print all logs in order (after all parallel executions complete)
+        # This ensures no interleaving of output from different sub-LLMs
+        num_prompts = len(prompts)
+        
         results = []
-        for result, log_buffer in results_with_logs:
+        for i, (result, log_buffer, spawn_id) in enumerate(results_with_logs):
+            # Print separator before each sub-LLM's output
+            if self.enable_logging:
+                print_sub_llm_separator(f"Sub Root LLM {spawn_id}", i, num_prompts)
+            
             if log_buffer:
                 flush_buffer_to_stdout(log_buffer)
             results.append(result)

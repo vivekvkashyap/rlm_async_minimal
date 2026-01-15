@@ -206,8 +206,12 @@ class RLM_REPL(RLM):
 
             # In practice, you may need some guardrails here.
             if final_answer:
+                self.logger.log_iteration_end()
                 self.logger.log_final_response(final_answer)
                 return final_answer
+            
+            # Log end of iteration (no final answer yet, continuing)
+            self.logger.log_iteration_end()
 
             
         # If we reach here, no final answer was found in any iteration - force final response

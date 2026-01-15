@@ -121,7 +121,6 @@ def execute_code(repl_env, code: str, repl_env_logger, logger) -> str:
         code: Python code to execute
         repl_env_logger: Logger for execution environment
         logger: Main logger
-        state_logger: Optional state logger
         
     Returns:
         Formatted execution result
@@ -132,11 +131,12 @@ def execute_code(repl_env, code: str, repl_env_logger, logger) -> str:
         formatted_result = format_execution_result(
             result.stdout, result.stderr, result.locals
         )
+        # Log and display the code execution (In/Out panels)
         repl_env_logger.log_execution(code, result.stdout, result.stderr, result.execution_time)
         repl_env_logger.display_last()
-
-        # Print out tool execution to root
-        logger.log_tool_execution("CODE_EXECUTION", formatted_result)
+        
+        # NOTE: Removed log_tool_execution - REPL logger already shows code and output nicely
+        # The In/Out panels are cleaner than the tool execution summary
         
         return formatted_result
         
