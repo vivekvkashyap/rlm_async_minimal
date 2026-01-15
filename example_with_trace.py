@@ -51,7 +51,7 @@ def example_with_trace():
     rlm = RLM_REPL(
         model="gpt-4o-mini",
         recursive_model="gpt-4o-mini",
-        max_depth=2,  # Enable 2 levels of recursion
+        max_depth=1,  # Enable sub-LLMs (depth 0 + depth 1)
         max_iterations=3,  # Fewer iterations for faster demo
         enable_logging=True,
     )

@@ -9,8 +9,8 @@ from typing import Dict
 
 DEFAULT_QUERY = "Please read through the context and answer any queries or respond to any instructions contained within it."
 
-# Base system prompt for the REPL environment
-REPL_SYSTEM_PROMPT_BASE = """You are tasked with answering a query with associated context. You can access, transform, and analyze this context interactively in a REPL environment that can recursively query sub-LLMs, which you are strongly encouraged to use as much as possible. You will be queried iteratively until you provide a final answer.
+# Base system prompt for the REPL environment WITH sub-LLM capabilities
+REPL_SYSTEM_PROMPT_WITH_SUB_LLMS = """You are tasked with answering a query with associated context. You can access, transform, and analyze this context interactively in a REPL environment that can recursively query sub-LLMs, which you are strongly encouraged to use as much as possible. You will be queried iteratively until you provide a final answer.
 
 The REPL environment is initialized with:
 1. A `context` variable that contains extremely important information about your query. You should check the content of the `context` variable to understand what you are working with. Make sure you look through it sufficiently as you answer your query.
@@ -67,14 +67,53 @@ IMPORTANT: When you are done with the iterative process, you MUST provide a fina
 Think step by step carefully, plan, and execute this plan immediately in your response -- do not just say "I will do this" or "I will do that". Output to the REPL environment and recursive LLMs as much as possible. Remember to explicitly answer the original query in your final answer.
 """
 
+# Base system prompt for the REPL environment WITHOUT sub-LLM capabilities (max_depth=1)
+REPL_SYSTEM_PROMPT_NO_SUB_LLMS = """You are tasked with answering a query with associated context. You can access, transform, and analyze this context interactively in a REPL environment. You will be queried iteratively until you provide a final answer.
+
+The REPL environment is initialized with:
+1. A `context` variable that contains extremely important information about your query. You should check the content of the `context` variable to understand what you are working with. Make sure you look through it sufficiently as you answer your query.
+2. The ability to use `print()` statements to view the output of your REPL code and continue your reasoning.
+3. Full Python capabilities for data processing, analysis, and manipulation.
+
+**NOTE**: You do NOT have access to `llm_query()` or `llm_batch()` functions. You must analyze the context and answer the query using only Python code execution.
+
+Make sure to explicitly look through the entire context in REPL before answering your query. Use Python's string processing, regex, and other built-in capabilities to analyze the context.
+
+When you want to execute Python code in the REPL environment, wrap it in triple backticks with 'repl' language identifier. For example:
+```repl
+# Look at the context
+print(context[:1000])  # First 1000 characters
+```
+
+```repl
+# Process and analyze
+import re
+sections = context.split("\\n\\n")
+for i, section in enumerate(sections[:5]):
+    print(f"Section {{i}}: {{section[:200]}}")
+```
+
+```repl
+# Build your answer
+key_findings = []
+# ... analyze and extract information ...
+final_answer = "Based on my analysis: " + ", ".join(key_findings)
+print(final_answer)
+```
+
+IMPORTANT: When you are done with the iterative process, you MUST provide a final answer inside a FINAL function when you have completed your task, NOT in code. Do not use these tags unless you have completed your task. You have two options:
+1. Use FINAL(your final answer here) to provide the answer directly
+2. Use FINAL_VAR(variable_name) to return a variable you have created in the REPL environment as your final output
+
+Think step by step carefully, plan, and execute this plan immediately in your response. Remember to explicitly answer the original query in your final answer.
+"""
+
 # Depth-specific information to insert into the prompt
 DEPTH_INFO_ROOT_WITH_RECURSIVE_SUBS = """**RECURSION INFO**: You are the ROOT LLM (depth 0). Your sub-LLMs (called via llm_query/llm_batch) also have their own REPL environments and can spawn further sub-LLMs! This means you can delegate complex sub-tasks that require code execution and analysis to your sub-LLMs. Current max_depth is {max_depth}."""
 
 DEPTH_INFO_MID_WITH_RECURSIVE_SUBS = """**RECURSION INFO**: You are a SUB-LLM at depth {depth} of {max_depth}. Your sub-LLMs (called via llm_query/llm_batch) also have their own REPL environments and can spawn further sub-LLMs. You can delegate complex sub-tasks to them."""
 
 DEPTH_INFO_WITH_TERMINAL_SUBS = """**RECURSION INFO**: You are at depth {depth} of {max_depth}. Your sub-LLMs (called via llm_query/llm_batch) are TERMINAL - they will directly answer without code execution. Design your prompts to them as complete, self-contained questions."""
-
-DEPTH_INFO_DEFAULT = """Your sub-LLMs are powerful and can process large amounts of context directly."""
 
 def build_system_prompt(depth: int = 0, max_depth: int = 1) -> list[Dict[str, str]]:
     """
@@ -87,21 +126,25 @@ def build_system_prompt(depth: int = 0, max_depth: int = 1) -> list[Dict[str, st
     Returns:
         List of message dicts for the system prompt
     """
-    # Determine depth-specific information
-    if max_depth <= 1:
-        # No recursion, use default
-        depth_info = DEPTH_INFO_DEFAULT
-    elif depth == 0 and depth < max_depth - 1:
-        # Root with recursive sub-LLMs
-        depth_info = DEPTH_INFO_ROOT_WITH_RECURSIVE_SUBS.format(max_depth=max_depth)
-    elif depth < max_depth - 1:
-        # Mid-level with recursive sub-LLMs
-        depth_info = DEPTH_INFO_MID_WITH_RECURSIVE_SUBS.format(depth=depth, max_depth=max_depth)
-    else:
-        # At or near max depth, sub-LLMs are terminal
-        depth_info = DEPTH_INFO_WITH_TERMINAL_SUBS.format(depth=depth, max_depth=max_depth)
+    # Check if this node can spawn sub-LLMs
+    can_spawn_sub_llms = depth < max_depth - 1
     
-    prompt_content = REPL_SYSTEM_PROMPT_BASE.format(depth_info=depth_info)
+    if not can_spawn_sub_llms:
+        # No sub-LLMs available - use the simplified prompt WITHOUT llm_query/llm_batch
+        prompt_content = REPL_SYSTEM_PROMPT_NO_SUB_LLMS
+    else:
+        # Sub-LLMs available - use the full prompt WITH llm_query/llm_batch
+        if depth == 0:
+            # Root with recursive sub-LLMs
+            depth_info = DEPTH_INFO_ROOT_WITH_RECURSIVE_SUBS.format(max_depth=max_depth)
+        elif depth < max_depth - 2:
+            # Mid-level with recursive sub-LLMs (their children also have REPL)
+            depth_info = DEPTH_INFO_MID_WITH_RECURSIVE_SUBS.format(depth=depth, max_depth=max_depth)
+        else:
+            # Can spawn, but children are terminal
+            depth_info = DEPTH_INFO_WITH_TERMINAL_SUBS.format(depth=depth, max_depth=max_depth)
+        
+        prompt_content = REPL_SYSTEM_PROMPT_WITH_SUB_LLMS.format(depth_info=depth_info)
     
     return [
         {
