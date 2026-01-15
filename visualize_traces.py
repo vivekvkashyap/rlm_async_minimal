@@ -29,7 +29,7 @@ def load_trace_data(trace_file):
 
 
 def create_tree_graph(trace_data):
-    """Create a professional tree graph matching the hand-drawn diagram layout."""
+    """Create a professional tree graph with RECURSIVE support for any depth level."""
     nodes = trace_data['nodes']
     tree_structure = trace_data['tree_structure']
     
@@ -39,6 +39,8 @@ def create_tree_graph(trace_data):
         1: '#4CAF50',  # Bold green for Sub-Root RLM (depth=1)
         2: '#2196F3',  # Bold blue for depth=2
         3: '#9C27B0',  # Bold purple for depth=3
+        4: '#E91E63',  # Pink for depth=4
+        5: '#00BCD4',  # Cyan for depth=5
     }
     
     # Border colors for depth highlighting
@@ -47,9 +49,18 @@ def create_tree_graph(trace_data):
         1: '#1B5E20',  # Dark green border for depth 1
         2: '#0D47A1',  # Dark blue border for depth 2
         3: '#4A148C',  # Dark purple for depth 3
+        4: '#880E4F',  # Dark pink for depth 4
+        5: '#006064',  # Dark cyan for depth 5
     }
     
-    # This will hold all visual elements: boxes for each iteration
+    # Layout constants
+    BOX_HEIGHT = 0.7
+    BOX_SPACING = 0.3
+    ROOT_BOX_WIDTH = 1.6
+    SUB_BOX_WIDTH = 1.8
+    HORIZONTAL_SPACING = 2.3
+    
+    # This will hold all visual elements
     all_boxes = []
     
     # First, extract the root node info
@@ -63,36 +74,103 @@ def create_tree_graph(trace_data):
     root_iterations = root_data.get('iterations', [])
     num_root_iters = len(root_iterations) if root_iterations else 1
     
-    # Get all children (sub-LLMs) from tree structure
-    children = root_node.get('children', [])
-    
-    # Parse spawn_id to determine which root iteration spawned each sub-LLM
-    # spawn_id format: "X-Y" where X is the parent iteration
-    sub_llms_by_root_iter = {}  # {root_iter: [sub_llm_ids]}
-    for child in children:
-        child_id = child['id']
-        # Parse spawn_id: "1-0" means spawned at root iter 1
-        parts = child_id.split('-')
-        if len(parts) >= 2:
-            try:
-                parent_iter = int(parts[0])
-            except:
-                parent_iter = 1  # Default
+    def get_parent_iteration_from_id(node_id):
+        """Parse spawn_id to get parent iteration."""
+        if '.' in node_id:
+            parent_part = node_id.split('.')[0]
+            parts = parent_part.split('-')
         else:
-            parent_iter = 1
+            parts = node_id.split('-')
+        if len(parts) >= 1:
+            try:
+                return int(parts[0])
+            except:
+                return 0
+        return 0
+    
+    def get_children_by_parent_iter(tree_node):
+        """Group children of a node by which iteration spawned them."""
+        children = tree_node.get('children', [])
+        children_by_iter = {}
+        for child in children:
+            spawn_iter = get_parent_iteration_from_id(child['id'])
+            if spawn_iter not in children_by_iter:
+                children_by_iter[spawn_iter] = []
+            children_by_iter[spawn_iter].append(child)
+        return children_by_iter
+    
+    def process_sub_llms_recursive(sub_llm_nodes, start_x, start_y, depth_level):
+        """
+        Process sub-LLMs: place them HORIZONTALLY next to each other,
+        with their iterations stacked VERTICALLY below.
+        Returns the total height used.
+        """
+        if not sub_llm_nodes:
+            return 0
         
-        if parent_iter not in sub_llms_by_root_iter:
-            sub_llms_by_root_iter[parent_iter] = []
-        sub_llms_by_root_iter[parent_iter].append(child_id)
+        max_height = 0
+        current_x = start_x
+        
+        for sub_node in sub_llm_nodes:
+            node_id = sub_node['id']
+            if node_id not in nodes:
+                continue
+            
+            node_data = nodes[node_id]
+            sub_iterations = node_data.get('iterations', [])
+            num_iters = len(sub_iterations) if sub_iterations else 1
+            
+            # Get this sub-LLM's children grouped by iteration
+            children_by_iter = get_children_by_parent_iter(sub_node)
+            
+            # Track height for this sub-LLM column
+            column_y = start_y
+            column_max_height = 0
+            
+            for iter_idx in range(num_iters):
+                # Create box for this iteration
+                box = {
+                    'x': current_x,
+                    'y': -column_y,
+                    'name': node_data['instance_name'],
+                    'iter': iter_idx,
+                    'depth': depth_level,
+                    'node_id': node_id,
+                    'type': 'sub_iter',
+                    'is_first_iter': iter_idx == 0
+                }
+                all_boxes.append(box)
+                
+                # Check if this iteration has children
+                iter_children = children_by_iter.get(iter_idx, [])
+                
+                if iter_children:
+                    # Recursively process children (place them to the right)
+                    child_height = process_sub_llms_recursive(
+                        iter_children,
+                        current_x + HORIZONTAL_SPACING,
+                        column_y,
+                        depth_level + 1
+                    )
+                    column_y += max(child_height, BOX_HEIGHT + BOX_SPACING)
+                else:
+                    column_y += BOX_HEIGHT + BOX_SPACING
+            
+            column_max_height = column_y - start_y
+            max_height = max(max_height, column_max_height)
+            
+            # Move to next horizontal position for next sub-LLM
+            current_x += HORIZONTAL_SPACING
+        
+        return max_height
+    
+    # Get root's children grouped by iteration
+    root_children_by_iter = get_children_by_parent_iter(root_node)
     
     # Current Y position tracker
     current_y = 0
-    box_height = 0.7
-    box_spacing = 0.3
-    box_width = 1.6
-    sub_box_width = 1.8
     
-    # For each Root LLM iteration, create a box and its sub-LLMs
+    # For each Root LLM iteration
     for iter_idx in range(num_root_iters):
         # Create Root LLM iteration box
         root_box = {
@@ -101,59 +179,26 @@ def create_tree_graph(trace_data):
             'name': 'Root LLM',
             'iter': iter_idx,
             'depth': 0,
-            'parent_iter': None,
             'node_id': root_id,
-            'type': 'root_iter'
+            'type': 'root_iter',
+            'is_first_iter': iter_idx == 0
         }
         all_boxes.append(root_box)
         
-        # Find sub-LLMs spawned in this iteration
-        sub_llm_ids = sub_llms_by_root_iter.get(iter_idx, [])
+        # Get sub-LLMs spawned in this iteration
+        iter_sub_llms = root_children_by_iter.get(iter_idx, [])
         
-        if sub_llm_ids:
-            # Position sub-LLMs horizontally next to each other
-            sub_x_start = 3.5  # Start position for sub-LLMs
-            sub_horizontal_spacing = 2.2  # Spacing between sub-LLMs
-            
-            # Track max height used by sub-LLMs
-            max_sub_height = 0
-            
-            for sub_idx, sub_llm_id in enumerate(sub_llm_ids):
-                if sub_llm_id not in nodes:
-                    continue
-                    
-                sub_node = nodes[sub_llm_id]
-                sub_iterations = sub_node.get('iterations', [])
-                num_sub_iters = len(sub_iterations) if sub_iterations else 1
-                
-                sub_x = sub_x_start + sub_idx * sub_horizontal_spacing
-                
-                # Create boxes for each iteration of the sub-LLM (stacked vertically)
-                for sub_iter_idx in range(max(num_sub_iters, 1)):
-                    sub_y = current_y + sub_iter_idx * (box_height + box_spacing)
-                    
-                    sub_box = {
-                        'x': sub_x,
-                        'y': -sub_y,
-                        'name': sub_node['instance_name'],
-                        'iter': sub_iter_idx,
-                        'depth': sub_node['depth'],
-                        'parent_iter': iter_idx,
-                        'node_id': sub_llm_id,
-                        'type': 'sub_iter',
-                        'is_first_iter': sub_iter_idx == 0
-                    }
-                    all_boxes.append(sub_box)
-                
-                # Track max height
-                sub_height = num_sub_iters * (box_height + box_spacing)
-                max_sub_height = max(max_sub_height, sub_height)
-            
-            # Move to next root iteration position
-            current_y += max(max_sub_height, box_height + box_spacing) + 0.8
+        if iter_sub_llms:
+            # Process sub-LLMs (they go to the right)
+            sub_height = process_sub_llms_recursive(
+                iter_sub_llms,
+                HORIZONTAL_SPACING,  # Start X position for sub-LLMs
+                current_y,
+                1  # depth level
+            )
+            current_y += max(sub_height, BOX_HEIGHT + BOX_SPACING) + 0.5
         else:
-            # No sub-LLMs, just move down
-            current_y += box_height + box_spacing + 0.5
+            current_y += BOX_HEIGHT + BOX_SPACING + 0.3
     
     # Build node_info for hover
     node_info = {}
@@ -168,50 +213,41 @@ def create_tree_graph(trace_data):
             'status': node_data['status'],
         }
     
-    # Create edges/arrows
+    # Create edge traces
     edge_traces = []
     
-    # Connect Root iterations vertically with bold arrows
-    root_boxes = [b for b in all_boxes if b['type'] == 'root_iter']
-    for i in range(len(root_boxes) - 1):
-        edge_traces.append(go.Scatter(
-            x=[root_boxes[i]['x'], root_boxes[i+1]['x']],
-            y=[root_boxes[i]['y'] - box_height/2 - 0.1, root_boxes[i+1]['y'] + box_height/2 + 0.1],
-            mode='lines',
-            line=dict(color='#212121', width=3),
-            hoverinfo='none',
-            showlegend=False
-        ))
-    
-    # Connect Root iteration to its sub-LLMs (horizontal arrows)
-    for root_box in root_boxes:
-        root_iter = root_box['iter']
-        # Find first iteration boxes of sub-LLMs spawned from this root iteration
-        sub_first_boxes = [b for b in all_boxes if b['type'] == 'sub_iter' and b['parent_iter'] == root_iter and b.get('is_first_iter', False)]
-        
-        for sub_box in sub_first_boxes:
-            # Draw horizontal line from root to sub-LLM
+    # Draw vertical edges (between iterations of same node)
+    for node_id in set(b['node_id'] for b in all_boxes):
+        node_boxes = sorted([b for b in all_boxes if b['node_id'] == node_id], key=lambda x: x['iter'])
+        for i in range(len(node_boxes) - 1):
             edge_traces.append(go.Scatter(
-                x=[root_box['x'] + box_width/2 + 0.1, sub_box['x'] - sub_box_width/2 - 0.1],
-                y=[root_box['y'], sub_box['y']],
+                x=[node_boxes[i]['x'], node_boxes[i+1]['x']],
+                y=[node_boxes[i]['y'] - BOX_HEIGHT/2 - 0.1, node_boxes[i+1]['y'] + BOX_HEIGHT/2 + 0.1],
                 mode='lines',
                 line=dict(color='#212121', width=3),
                 hoverinfo='none',
                 showlegend=False
             ))
     
-    # Connect sub-LLM iteration boxes vertically
-    for node_id in set(b['node_id'] for b in all_boxes if b['type'] == 'sub_iter'):
-        sub_boxes = sorted([b for b in all_boxes if b['type'] == 'sub_iter' and b['node_id'] == node_id], key=lambda x: x['iter'])
-        for i in range(len(sub_boxes) - 1):
-            edge_traces.append(go.Scatter(
-                x=[sub_boxes[i]['x'], sub_boxes[i+1]['x']],
-                y=[sub_boxes[i]['y'] - box_height/2 - 0.1, sub_boxes[i+1]['y'] + box_height/2 + 0.1],
-                mode='lines',
-                line=dict(color='#212121', width=2.5),
-                hoverinfo='none',
-                showlegend=False
-            ))
+    # Draw horizontal edges (from parent iteration to child's first iteration)
+    # Root -> Sub-Root connections
+    root_boxes = [b for b in all_boxes if b['type'] == 'root_iter']
+    for root_box in root_boxes:
+        root_iter = root_box['iter']
+        # Find sub-LLMs spawned from this root iteration
+        sub_first_boxes = [b for b in all_boxes if b['depth'] == 1 and b.get('is_first_iter', False)]
+        for sub_box in sub_first_boxes:
+            # Check if this sub-LLM was spawned from this root iteration
+            spawn_iter = get_parent_iteration_from_id(sub_box['node_id'])
+            if spawn_iter == root_iter:
+                edge_traces.append(go.Scatter(
+                    x=[root_box['x'] + ROOT_BOX_WIDTH/2 + 0.1, sub_box['x'] - SUB_BOX_WIDTH/2 - 0.1],
+                    y=[root_box['y'], sub_box['y']],
+                    mode='lines',
+                    line=dict(color='#212121', width=3),
+                    hoverinfo='none',
+                    showlegend=False
+                ))
     
     # Create figure
     fig = go.Figure(edge_traces)
@@ -222,24 +258,21 @@ def create_tree_graph(trace_data):
     
     for box in all_boxes:
         depth = box['depth']
-        color = DEPTH_COLORS.get(depth, '#CFD8DC')
-        border_color = DEPTH_BORDERS.get(depth, '#607D8B')
+        color = DEPTH_COLORS.get(depth, DEPTH_COLORS.get(depth % 6, '#CFD8DC'))
+        border_color = DEPTH_BORDERS.get(depth, DEPTH_BORDERS.get(depth % 6, '#607D8B'))
         
-        # Use different widths for root vs sub
-        current_box_width = box_width if box['type'] == 'root_iter' else sub_box_width
+        current_box_width = ROOT_BOX_WIDTH if box['depth'] == 0 else SUB_BOX_WIDTH
         
-        # Add rectangle with bold border
         shapes.append(dict(
             type="rect",
-            x0=box['x'] - current_box_width/2, y0=box['y'] - box_height/2,
-            x1=box['x'] + current_box_width/2, y1=box['y'] + box_height/2,
+            x0=box['x'] - current_box_width/2, y0=box['y'] - BOX_HEIGHT/2,
+            x1=box['x'] + current_box_width/2, y1=box['y'] + BOX_HEIGHT/2,
             fillcolor=color,
             line=dict(color=border_color, width=3),
             opacity=1
         ))
         
-        # Add text
-        if box['type'] == 'root_iter':
+        if box['depth'] == 0:
             text = f"<b style='font-size:12px;'>{box['name']}</b><br><b style='font-size:11px;'>ITER={box['iter']}</b>"
         else:
             if box.get('is_first_iter', False):
@@ -498,12 +531,16 @@ get_trace_logger().save_trace()
 
 🟩 **Green** — Sub Root LLM (depth=1)
 
-🟦 **Blue** — Nested LLM (depth=2)
+🟦 **Blue** — Sub-Sub LLM (depth=2)
 
-🟪 **Purple** — Deeper LLMs (depth=3+)
+🟪 **Purple** — depth=3
+
+🩷 **Pink** — depth=4
+
+🩵 **Cyan** — depth=5+
     """)
     st.sidebar.markdown("")
-    st.sidebar.caption("💡 Each box represents one iteration of an LLM")
+    st.sidebar.caption("💡 Each box = one iteration. Supports unlimited depth!")
     
     # Main content: Tree visualization
     st.markdown("## 🌲 Execution Tree Visualization")
