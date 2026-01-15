@@ -20,6 +20,7 @@ import rlm.utils.utils as utils
 
 from rlm.logger.root_logger import ColorfulLogger
 from rlm.logger.repl_logger import REPLEnvLogger
+from rlm.logger.trace_logger import get_trace_logger
 
 
 def generate_instance_name(depth: int, parent_name: str = "", spawn_id: str = "") -> str:
@@ -122,6 +123,36 @@ class RLM_REPL(RLM):
         self.query = None
         self.enable_logging = enable_logging
         
+        # Get trace logger for execution tree visualization
+        self.trace_logger = get_trace_logger()
+        
+        # Generate node_id for trace logging
+        if depth == 0:
+            self.node_id = "root"
+        else:
+            self.node_id = spawn_id if spawn_id else f"node_{id(self)}"
+        
+        # Create node in trace
+        if self.trace_logger:
+            parent_node_id = None
+            if depth > 0 and parent_name:
+                # Determine parent's node_id from parent_name
+                if "Root LLM" == parent_name:
+                    parent_node_id = "root"
+                else:
+                    # Extract spawn_id from parent_name (e.g., "Sub Root LLM 1-0" -> "1-0")
+                    parts = parent_name.split()
+                    if len(parts) >= 4:
+                        parent_node_id = parts[3]
+            
+            self.trace_logger.create_node(
+                node_id=self.node_id,
+                instance_name=self.instance_name,
+                depth=depth,
+                max_depth=max_depth,
+                parent_id=parent_node_id
+            )
+        
         # Log depth info (initialization is now shown via logger)
     
     def setup_context(self, context: List[str] | str | List[Dict[str, str]], query: Optional[str] = None):
@@ -181,6 +212,14 @@ class RLM_REPL(RLM):
             # Log iteration start
             self.logger.log_iteration_start(iteration)
             
+            # Trace: log iteration start
+            if self.trace_logger:
+                self.trace_logger.log_iteration_start(
+                    node_id=self.node_id,
+                    iteration_number=iteration,
+                    prompt=query or ""
+                )
+            
             # Query root LM to interact with REPL environment
             response = self.llm.completion(self.messages + [next_action_prompt(query, iteration)])
             
@@ -188,11 +227,23 @@ class RLM_REPL(RLM):
             code_blocks = utils.find_code_blocks(response)
             self.logger.log_model_response(response, has_tool_calls=code_blocks is not None)
             
+            # Trace: log response
+            if self.trace_logger:
+                self.trace_logger.log_response(
+                    node_id=self.node_id,
+                    iteration_number=iteration,
+                    response=response,
+                    has_code=code_blocks is not None
+                )
+            
             # Process code execution or add assistant message
             if code_blocks is not None:
                 self.messages = utils.process_code_execution(
                     response, self.messages, self.repl_env, 
-                    self.repl_env_logger, self.logger
+                    self.repl_env_logger, self.logger,
+                    trace_logger=self.trace_logger,
+                    node_id=self.node_id,
+                    iteration_number=iteration
                 )
             else:
                 # Add assistant message when there are no code blocks
@@ -208,6 +259,11 @@ class RLM_REPL(RLM):
             if final_answer:
                 self.logger.log_iteration_end()
                 self.logger.log_final_response(final_answer)
+                
+                # Trace: log final answer
+                if self.trace_logger:
+                    self.trace_logger.log_final_answer(self.node_id, final_answer)
+                
                 return final_answer
             
             # Log end of iteration (no final answer yet, continuing)
@@ -218,6 +274,10 @@ class RLM_REPL(RLM):
         self.messages.append(next_action_prompt(query, iteration, final_answer=True))
         final_answer = self.llm.completion(self.messages)
         self.logger.log_final_response(final_answer)
+        
+        # Trace: log final answer
+        if self.trace_logger:
+            self.trace_logger.log_final_answer(self.node_id, final_answer)
 
         return final_answer
     

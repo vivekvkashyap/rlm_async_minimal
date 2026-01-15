@@ -112,7 +112,7 @@ def format_execution_result(
     return "\n\n".join(result_parts) if result_parts else "No output"
 
 
-def execute_code(repl_env, code: str, repl_env_logger, logger) -> str:
+def execute_code(repl_env, code: str, repl_env_logger, logger, trace_logger=None, node_id=None, iteration_number=None) -> str:
     """
     Execute code in the REPL environment and return formatted result.
     
@@ -121,6 +121,9 @@ def execute_code(repl_env, code: str, repl_env_logger, logger) -> str:
         code: Python code to execute
         repl_env_logger: Logger for execution environment
         logger: Main logger
+        trace_logger: Optional trace logger for execution tree
+        node_id: Node ID for trace logging
+        iteration_number: Iteration number for trace logging
         
     Returns:
         Formatted execution result
@@ -134,6 +137,18 @@ def execute_code(repl_env, code: str, repl_env_logger, logger) -> str:
         # Log and display the code execution (In/Out panels)
         repl_env_logger.log_execution(code, result.stdout, result.stderr, result.execution_time)
         repl_env_logger.display_last()
+        
+        # Trace: log code execution
+        if trace_logger and node_id is not None and iteration_number is not None:
+            trace_logger.log_code_execution(
+                node_id=node_id,
+                iteration_number=iteration_number,
+                code=code,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                execution_time=result.execution_time,
+                execution_number=repl_env_logger.execution_count
+            )
         
         # NOTE: Removed log_tool_execution - REPL logger already shows code and output nicely
         # The In/Out panels are cleaner than the tool execution summary
@@ -150,6 +165,9 @@ def process_code_execution(
     repl_env,
     repl_env_logger,
     logger,
+    trace_logger=None,
+    node_id=None,
+    iteration_number=None,
 ) -> List[Dict[str, str]]:
     """
     Process code execution from the model response. If recursive is disabled, we should
@@ -161,6 +179,9 @@ def process_code_execution(
         repl_env: The REPL environment
         repl_env_logger: Logger for execution environment
         logger: Main logger
+        trace_logger: Optional trace logger for execution tree
+        node_id: Node ID for trace logging
+        iteration_number: Iteration number for trace logging
         
     Returns:
         Updated messages list
@@ -171,7 +192,12 @@ def process_code_execution(
     if code_blocks:
         # Execute each code block
         for code in code_blocks:
-            execution_result = execute_code(repl_env, code, repl_env_logger, logger)
+            execution_result = execute_code(
+                repl_env, code, repl_env_logger, logger,
+                trace_logger=trace_logger,
+                node_id=node_id,
+                iteration_number=iteration_number
+            )
             
             # Add execution result to conversation
             messages = add_execution_result_to_messages(

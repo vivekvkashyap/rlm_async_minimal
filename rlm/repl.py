@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Optional, List, TYPE_CHECKING
 
 from rlm import RLM
+from rlm.logger.trace_logger import get_trace_logger
 
 # Use TYPE_CHECKING to avoid circular imports
 if TYPE_CHECKING:
@@ -323,6 +324,22 @@ class REPLEnv:
                     parent_name=self.parent_instance_name,
                     spawn_id=spawn_id,
                 )
+                
+                # Trace: log sub-LLM spawn
+                trace_logger = get_trace_logger()
+                if trace_logger:
+                    # Determine parent node ID
+                    if self.depth == 0:
+                        parent_node_id = "root"
+                    else:
+                        parent_node_id = self.parent_spawn_id if self.parent_spawn_id else "root"
+                    
+                    trace_logger.log_sub_llm_spawn(
+                        parent_node_id=parent_node_id,
+                        parent_iteration=self.parent_current_iteration,
+                        child_node_id=spawn_id
+                    )
+                
                 # RLM_REPL.completion(context, query) - use prompt as context
                 return sub_rlm.completion(context=prompt, query="Process this and provide your answer.")
             else:
